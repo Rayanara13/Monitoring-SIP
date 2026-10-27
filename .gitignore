@@ -1,0 +1,12 @@
+auth.json
+.env
+users_data/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+build/
+dist/
+.idea/
+offline/.cache/

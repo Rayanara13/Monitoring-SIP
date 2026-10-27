@@ -1,0 +1,1786 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>SIP Monitor by Стёпчик SVL 1.1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="/static/socket.io.min.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #030810;
+  --glass: rgba(8, 18, 45, 0.6);
+  --glass-light: rgba(15, 30, 70, 0.5);
+  --glass-hover: rgba(20, 40, 90, 0.65);
+  --border: rgba(80, 130, 255, 0.1);
+  --border-strong: rgba(80, 130, 255, 0.22);
+  --text: #e2eaff;
+  --text-dim: rgba(180, 200, 255, 0.65);
+  --text-muted: rgba(120, 150, 220, 0.45);
+  --accent: #3b82f6;
+  --accent-glow: rgba(59, 130, 246, 0.3);
+  --green: #22c55e;
+  --green-bg: rgba(34, 197, 94, 0.1);
+  --green-glow: rgba(34, 197, 94, 0.25);
+  --orange: #f59e0b;
+  --orange-bg: rgba(245, 158, 11, 0.1);
+  --red: #ef4444;
+  --red-bg: rgba(239, 68, 68, 0.1);
+  --red-glow: rgba(239, 68, 68, 0.25);
+  --gray: #64748b;
+  --gray-bg: rgba(100, 116, 139, 0.1);
+  --radius: 20px;
+  --radius-sm: 12px;
+  --shadow: 0 24px 48px rgba(0,0,0,.5);
+}
+
+html, body { height: 100%; }
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  overflow-x: hidden;
+}
+
+/* ─── BACKGROUND ─── */
+.bg-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(100px);
+  opacity: 0.4;
+  animation: drift linear infinite;
+}
+.orb-1 { width:800px;height:800px;background:radial-gradient(circle,#1d4ed8,#1e3a8a 40%,transparent 70%);top:-300px;left:-200px;animation-duration:30s; }
+.orb-2 { width:600px;height:600px;background:radial-gradient(circle,#0e7490,#164e63 40%,transparent 70%);bottom:-200px;right:-150px;animation-duration:38s;animation-delay:-15s; }
+.orb-3 { width:400px;height:400px;background:radial-gradient(circle,#4338ca,#312e81 40%,transparent 70%);top:45%;left:58%;animation-duration:45s;animation-delay:-22s; }
+@keyframes drift {
+  0%   { transform:translate(0,0) scale(1); }
+  25%  { transform:translate(25px,-18px) scale(1.03); }
+  50%  { transform:translate(-12px,28px) scale(0.97); }
+  75%  { transform:translate(-22px,-8px) scale(1.02); }
+  100% { transform:translate(0,0) scale(1); }
+}
+.bg-grid {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(59,130,246,.035) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(59,130,246,.035) 1px,transparent 1px);
+  background-size: 52px 52px;
+  pointer-events: none;
+}
+
+/* ─── LAYOUT ─── */
+.app {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ─── HEADER ─── */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  padding: 12px 24px;
+  background: rgba(3, 8, 16, 0.75);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.header-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.logo-icon {
+  width: 36px; height: 36px;
+  background: linear-gradient(135deg, rgba(59,130,246,.2), rgba(14,116,144,.1));
+  border: 1px solid rgba(59,130,246,.25);
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+}
+.logo-icon svg { width: 18px; height: 18px; }
+.logo-name {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  line-height: 1.1;
+}
+.logo-ver {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: 'DM Mono', monospace;
+}
+
+.header-stats {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  justify-content: center;
+}
+.hstat {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--glass-light);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.hstat-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.hstat-dot.green { background: var(--green); box-shadow: 0 0 6px var(--green-glow); }
+.hstat-dot.orange { background: var(--orange); }
+.hstat-dot.gray { background: var(--gray); }
+.hstat-dot.blue { background: var(--accent); }
+.hstat-val { font-weight: 700; font-size: 15px; }
+.hstat-lbl { color: var(--text-dim); font-size: 12px; }
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.conn-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--glass-light);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: 'DM Mono', monospace;
+}
+.conn-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%,100% { opacity:1; box-shadow: 0 0 6px rgba(34,197,94,.6); }
+  50% { opacity:.5; box-shadow: none; }
+}
+.conn-dot.offline { background: var(--red); animation: none; }
+.conn-dot.error { background: var(--orange); animation: none; }
+
+/* ─── NAV TABS ─── */
+.nav {
+  position: sticky;
+  top: 61px;
+  z-index: 90;
+  padding: 10px 24px;
+  background: rgba(3, 8, 16, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all .18s;
+  white-space: nowrap;
+}
+.nav-btn svg { width: 15px; height: 15px; opacity: .7; }
+.nav-btn:hover {
+  background: var(--glass-light);
+  border-color: var(--border);
+  color: var(--text);
+}
+.nav-btn.active {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: rgba(59, 130, 246, 0.3);
+  color: #93c5fd;
+  box-shadow: 0 0 12px rgba(59,130,246,.1);
+}
+.nav-btn.active svg { opacity: 1; }
+.nav-count {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(59,130,246,.2);
+  color: #93c5fd;
+  font-size: 11px;
+  font-family: 'DM Mono', monospace;
+}
+
+.nav-sep { flex: 1; }
+.nav-user {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: 'DM Mono', monospace;
+}
+
+/* ─── CONTENT ─── */
+.content {
+  padding: 20px 24px 40px;
+}
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+
+/* ─── ADD PHONE BAR ─── */
+.add-bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 14px 16px;
+  background: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  backdrop-filter: blur(16px);
+  align-items: center;
+}
+.add-bar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+  margin-right: 4px;
+}
+.inp {
+  flex: 1;
+  padding: 9px 13px;
+  background: rgba(10, 20, 55, 0.7);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px;
+  outline: none;
+  transition: border-color .2s, box-shadow .2s;
+  min-width: 0;
+}
+.inp::placeholder { color: var(--text-muted); }
+.inp:focus {
+  border-color: rgba(59,130,246,.4);
+  box-shadow: 0 0 0 2px rgba(59,130,246,.1);
+}
+
+/* ─── BUTTONS ─── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 16px;
+  border-radius: var(--radius-sm);
+  border: none;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.btn svg { width: 14px; height: 14px; }
+.btn-primary {
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  color: white;
+  box-shadow: 0 4px 14px rgba(37,99,235,.3);
+}
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(37,99,235,.45); }
+.btn-primary:active { transform: none; }
+.btn-ghost {
+  background: var(--glass-light);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.btn-ghost:hover { border-color: var(--border-strong); color: var(--text); }
+.btn-danger {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  color: white;
+  box-shadow: 0 4px 14px rgba(239,68,68,.25);
+}
+.btn-danger:hover { transform: translateY(-1px); }
+.btn-sm { padding: 6px 11px; font-size: 12px; border-radius: 9px; }
+.btn-xs { padding: 4px 8px; font-size: 11px; border-radius: 7px; }
+
+/* ─── SECTIONS ─── */
+.section {
+  margin-bottom: 16px;
+  border-radius: var(--radius);
+  background: var(--glass);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  overflow: hidden;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+}
+.section-head:hover { background: rgba(255,255,255,.02); }
+.section-icon { font-size: 16px; line-height: 1; }
+.section-title { font-size: 14px; font-weight: 700; flex: 1; }
+.section-cnt {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.06);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: 'DM Mono', monospace;
+}
+.section-toggle { color: var(--text-muted); font-size: 12px; transition: transform .2s; }
+.section.collapsed .section-toggle { transform: rotate(-90deg); }
+.section.collapsed .section-body { display: none; }
+
+.section-body {
+  padding: 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+.section-empty {
+  padding: 24px 18px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* ─── PHONE CARD ─── */
+.card {
+  position: relative;
+  border-radius: 16px;
+  background: linear-gradient(160deg, rgba(20,35,80,.7), rgba(10,18,50,.8));
+  border: 1px solid var(--border);
+  overflow: hidden;
+  transition: box-shadow .2s, border-color .2s, transform .15s;
+  cursor: default;
+}
+.card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+}
+.card.state-active {
+  border-color: rgba(245,158,11,.2);
+  box-shadow: 0 0 20px rgba(245,158,11,.08);
+}
+.card.state-active:hover { box-shadow: 0 0 28px rgba(245,158,11,.18); }
+.card.state-talk {
+  border-color: rgba(239,68,68,.25);
+  box-shadow: 0 0 20px rgba(239,68,68,.1);
+}
+.card.state-talk:hover { box-shadow: 0 0 28px rgba(239,68,68,.2); }
+.card.state-idle:hover { box-shadow: 0 0 20px rgba(34,197,94,.1); }
+.card.state-offline { opacity: .7; filter: saturate(.7); }
+
+/* color accent bar — left side */
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 3px;
+  background: var(--gray);
+  transition: background .3s;
+}
+.card.state-idle::before { background: var(--green); }
+.card.state-active::before { background: var(--orange); }
+.card.state-talk::before { background: var(--red); box-shadow: 0 0 8px var(--red-glow); }
+.card.state-offline::before { background: var(--gray); }
+
+.card-inner { padding: 14px 14px 14px 18px; }
+
+.card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.card-info { flex: 1; min-width: 0; }
+.card-name {
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-bottom: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: 'DM Mono', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+  white-space: nowrap;
+  letter-spacing: 0.2px;
+}
+.pill-idle { background: var(--green-bg); color: #86efac; border: 1px solid rgba(34,197,94,.2); }
+.pill-active { background: var(--orange-bg); color: #fcd34d; border: 1px solid rgba(245,158,11,.2); }
+.pill-talk { background: var(--red-bg); color: #fca5a5; border: 1px solid rgba(239,68,68,.2); animation: talk-pulse 1.8s ease-in-out infinite; }
+.pill-offline { background: var(--gray-bg); color: #94a3b8; border: 1px solid rgba(100,116,139,.2); }
+@keyframes talk-pulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+  50% { box-shadow: 0 0 0 3px rgba(239,68,68,.12); }
+}
+
+/* peer/duration block */
+.card-call {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.call-block {
+  flex: 1;
+  padding: 8px 10px;
+  background: rgba(0,0,0,.2);
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,.04);
+}
+.call-label { font-size: 10px; color: var(--text-muted); margin-bottom: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
+.call-val { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.call-val.duration { font-family: 'DM Mono', monospace; color: #fcd34d; }
+
+/* bottom row */
+.card-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.card-ping {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+.ping-ok { background: rgba(34,197,94,.1); color: #86efac; }
+.ping-fail { background: rgba(239,68,68,.1); color: #fca5a5; }
+.ping-unknown { background: rgba(100,116,139,.1); color: #94a3b8; }
+
+.card-acts {
+  display: flex;
+  gap: 5px;
+}
+
+.card-time {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: 'DM Mono', monospace;
+}
+
+/* функции телефона из Action URL: DND, переадресации, mute… */
+.card-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.flag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+  background: rgba(59,130,246,.1);
+  color: #93c5fd;
+  border: 1px solid rgba(59,130,246,.18);
+}
+.flag-warn { background: var(--red-bg); color: #fca5a5; border-color: rgba(239,68,68,.2); }
+.flag-muted { background: var(--gray-bg); color: #94a3b8; border-color: rgba(100,116,139,.2); }
+
+/* drag */
+.card.dragging { opacity: .4; transform: rotate(1.5deg) scale(0.97); }
+
+/* ─── MODAL ─── */
+.backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.6);
+  backdrop-filter: blur(4px);
+  z-index: 500;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.backdrop.open { display: flex; }
+.modal {
+  width: min(460px, 100%);
+  background: rgba(8, 18, 45, 0.92);
+  border: 1px solid var(--border-strong);
+  border-radius: 24px;
+  box-shadow: 0 32px 64px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.04) inset;
+  backdrop-filter: blur(32px);
+  overflow: hidden;
+  animation: modal-in .25s cubic-bezier(.22,1,.36,1);
+}
+@keyframes modal-in {
+  from { opacity:0; transform: scale(.94) translateY(12px); }
+  to   { opacity:1; transform: scale(1) translateY(0); }
+}
+.modal-head {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.modal-title { font-size: 16px; font-weight: 700; }
+.modal-body { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+.modal-inp {
+  width: 100%;
+  padding: 11px 14px;
+  background: rgba(10,20,55,.8);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+  outline: none;
+  transition: border-color .2s, box-shadow .2s;
+}
+.modal-inp:focus { border-color: rgba(59,130,246,.4); box-shadow: 0 0 0 2px rgba(59,130,246,.1); }
+.modal-inp[readonly] { opacity: .5; cursor: default; }
+.modal-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 0 20px 20px; }
+
+/* ─── TABLE / HISTORY ─── */
+.table-wrap {
+  overflow-x: auto;
+  border-radius: var(--radius);
+  background: var(--glass);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+thead th {
+  padding: 12px 16px;
+  text-align: left;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0,0,0,.1);
+  position: sticky;
+  top: 0;
+  white-space: nowrap;
+}
+tbody tr {
+  border-bottom: 1px solid rgba(255,255,255,.03);
+  transition: background .15s;
+}
+tbody tr:last-child { border-bottom: none; }
+tbody tr:hover { background: rgba(255,255,255,.03); }
+tbody td { padding: 11px 16px; color: var(--text-dim); vertical-align: middle; }
+tbody td:first-child { color: var(--text); }
+.mono { font-family: 'DM Mono', monospace; }
+.dir-in  { color: #86efac; font-weight: 700; }
+.dir-out { color: #93c5fd; font-weight: 700; }
+
+/* ─── FILTERS ─── */
+.filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  align-items: center;
+}
+.filter-sel, .filter-date {
+  padding: 8px 12px;
+  background: var(--glass-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color .2s;
+}
+.filter-sel:focus, .filter-date:focus { border-color: var(--border-strong); }
+.filter-sel option { background: #0a1430; }
+
+/* pagination */
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.pagination-info { flex: 1; text-align: center; font-family: 'DM Mono', monospace; }
+
+/* ─── LIBRARY ─── */
+.lib-set {
+  padding: 16px;
+  border-radius: var(--radius);
+  background: var(--glass);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.lib-user { font-weight: 700; flex: 1; }
+.lib-count { font-size: 12px; color: var(--text-muted); font-family: 'DM Mono', monospace; }
+
+/* ─── ACCOUNTS / TESTS ─── */
+.token-box {
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  background: rgba(0,0,0,.25);
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+/* ─── SHARED TOGGLE ─── */
+.shared-banner {
+  padding: 14px 18px;
+  background: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  backdrop-filter: blur(16px);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.shared-banner-text { flex: 1; font-size: 13px; color: var(--text-dim); }
+
+/* ─── SECTION HEADER SPACER ─── */
+.pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.pane-title { font-size: 18px; font-weight: 700; }
+
+/* ─── REGISTRATION RESULT ─── */
+.reg-result {
+  display: none;
+  padding: 16px;
+  border-radius: var(--radius-sm);
+  background: var(--green-bg);
+  border: 1px solid rgba(34,197,94,.2);
+  margin-top: 12px;
+}
+.reg-result.visible { display: block; }
+.reg-password { font-size: 22px; font-weight: 700; color: var(--orange); font-family: 'DM Mono', monospace; }
+.reg-warn { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+
+/* ─── TEST LOG ─── */
+.test-log {
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(0,0,0,.3);
+  border: 1px solid var(--border);
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+  display: none;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+.test-log.visible { display: block; }
+
+/* ─── СЕРВЕР ОБНОВИЛСЯ ─── */
+.update-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: 600;
+  display: none;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  border-radius: var(--radius-sm);
+  background: rgba(8, 18, 45, 0.95);
+  border: 1px solid rgba(245,158,11,.35);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+.update-banner.visible { display: flex; }
+
+/* ─── ACTION URL ─── */
+.aurl-url {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  word-break: break-all;
+  color: var(--text-dim);
+}
+.aurl-en { font-size: 11px; color: var(--text-muted); }
+.ev-unknown td { color: #fca5a5; }
+
+/* ─── RESPONSIVE ─── */
+@media (max-width: 900px) {
+  .header-stats { gap: 5px; }
+  .hstat-lbl { display: none; }
+  .hstat { padding: 6px 10px; }
+}
+@media (max-width: 640px) {
+  .header { padding: 10px 14px; gap: 10px; }
+  .nav { padding: 8px 14px; }
+  .content { padding: 14px 14px 30px; }
+  .add-bar { flex-wrap: wrap; }
+  .header-stats { display: none; }
+  .section-body { grid-template-columns: 1fr; }
+}
+
+/* scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(80,130,255,.2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(80,130,255,.4); }
+</style>
+</head>
+<body>
+
+<!-- BG -->
+<div class="bg-wrap">
+  <div class="orb orb-1"></div>
+  <div class="orb orb-2"></div>
+  <div class="orb orb-3"></div>
+</div>
+<div class="bg-grid"></div>
+
+<div class="app">
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 18 18" fill="none">
+          <circle cx="9" cy="9" r="3.5" stroke="#60a5fa" stroke-width="1.2"/>
+          <circle cx="9" cy="9" r="6.5" stroke="#3b82f6" stroke-width=".8" stroke-dasharray="2 2" opacity=".5"/>
+          <circle cx="9" cy="9" r="1.2" fill="#93c5fd"/>
+          <line x1="9" y1="2" x2="9" y2="4" stroke="#60a5fa" stroke-width="1" stroke-linecap="round"/>
+          <line x1="9" y1="14" x2="9" y2="16" stroke="#60a5fa" stroke-width="1" stroke-linecap="round"/>
+          <line x1="2" y1="9" x2="4" y2="9" stroke="#60a5fa" stroke-width="1" stroke-linecap="round"/>
+          <line x1="14" y1="9" x2="16" y2="9" stroke="#60a5fa" stroke-width="1" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div>
+        <div class="logo-name">SIP Monitor</div>
+        <div class="logo-ver">Rel 1.1</div>
+      </div>
+    </div>
+
+    <div class="header-stats">
+      <div class="hstat">
+        <div class="hstat-dot orange"></div>
+        <span class="hstat-val" id="h-active">0</span>
+        <span class="hstat-lbl">Активные</span>
+      </div>
+      <div class="hstat">
+        <div class="hstat-dot green"></div>
+        <span class="hstat-val" id="h-idle">0</span>
+        <span class="hstat-lbl">В покое</span>
+      </div>
+      <div class="hstat">
+        <div class="hstat-dot gray"></div>
+        <span class="hstat-val" id="h-offline">0</span>
+        <span class="hstat-lbl">Offline</span>
+      </div>
+      <div class="hstat">
+        <div class="hstat-dot blue"></div>
+        <span class="hstat-val" id="h-total">0</span>
+        <span class="hstat-lbl">Всего</span>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <div class="conn-badge">
+        <div class="conn-dot" id="conn-dot"></div>
+        <span id="conn-text">Соединение...</span>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="logout()">Выйти</button>
+    </div>
+  </header>
+
+  <!-- NAV -->
+  <nav class="nav">
+    <button class="nav-btn active" onclick="switchTab('monitoring')" id="tab-btn-monitoring">
+      <svg viewBox="0 0 15 15" fill="none"><rect x="1" y="1" width="5.5" height="5.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/><rect x="8.5" y="1" width="5.5" height="5.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/><rect x="1" y="8.5" width="5.5" height="5.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/><rect x="8.5" y="8.5" width="5.5" height="5.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/></svg>
+      Мониторинг
+      <span class="nav-count" id="nav-cnt">0</span>
+    </button>
+    <button class="nav-btn" onclick="switchTab('library')" id="tab-btn-library">
+      <svg viewBox="0 0 15 15" fill="none"><path d="M2 3h11M2 7.5h11M2 12h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+      Библиотека
+    </button>
+    <button class="nav-btn" onclick="switchTab('history')" id="tab-btn-history">
+      <svg viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="7.5" r="5.5" stroke="currentColor" stroke-width="1.2"/><path d="M7.5 4.5v3l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      История
+    </button>
+    <button class="nav-btn" onclick="switchTab('accounts')" id="tab-btn-accounts" style="display:none">
+      <svg viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="5" r="2.5" stroke="currentColor" stroke-width="1.2"/><path d="M2 13c0-3.03 2.46-5.5 5.5-5.5S13 9.97 13 13" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      Аккаунты
+    </button>
+    <button class="nav-btn" onclick="switchTab('tests')" id="tab-btn-tests" style="display:none">
+      <svg viewBox="0 0 15 15" fill="none"><path d="M5 1v5L2 13h11L10 6V1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 1h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      Тесты
+    </button>
+    <div class="nav-sep"></div>
+    <span class="nav-user" id="nav-user"></span>
+  </nav>
+
+  <!-- CONTENT -->
+  <main class="content">
+
+    <!-- ── MONITORING ── -->
+    <div class="tab-pane active" id="pane-monitoring">
+      <div class="add-bar">
+        <span class="add-bar-title">Добавить:</span>
+        <input class="inp" id="new-number" placeholder="Номер">
+        <input class="inp" id="new-name" placeholder="Название / кабинет">
+        <input class="inp" id="new-ip" placeholder="IP адрес">
+        <button class="btn btn-primary" onclick="addPhone()">
+          <svg viewBox="0 0 14 14" fill="none"><path d="M7 1v12M1 7h12" stroke="white" stroke-width="1.6" stroke-linecap="round"/></svg>
+          Добавить
+        </button>
+      </div>
+
+      <div id="sections-wrap"></div>
+    </div>
+
+    <!-- ── LIBRARY ── -->
+    <div class="tab-pane" id="pane-library">
+      <div class="pane-header">
+        <div class="pane-title">Библиотека наборов</div>
+        <button class="btn btn-ghost btn-sm" onclick="loadLibrary()">Обновить</button>
+      </div>
+      <div class="shared-banner">
+        <div class="shared-banner-text">
+          Сделай набор общим — другие пользователи смогут импортировать твои карточки одним кликом.
+        </div>
+        <button class="btn btn-ghost btn-sm" id="shared-toggle-btn" onclick="toggleShared()">Загрузка...</button>
+      </div>
+      <div id="library-body">
+        <div style="color:var(--text-muted);font-size:13px">Загрузка...</div>
+      </div>
+    </div>
+
+    <!-- ── HISTORY ── -->
+    <div class="tab-pane" id="pane-history">
+      <div class="pane-header">
+        <div class="pane-title">История звонков</div>
+        <button class="btn btn-ghost btn-sm" onclick="loadHistory()">Обновить</button>
+      </div>
+      <div class="filters">
+        <select class="filter-sel" id="hist-number" onchange="loadHistory()">
+          <option value="">Все номера</option>
+        </select>
+        <input type="date" class="filter-date" id="hist-date" onchange="loadHistory()">
+        <div id="hist-user-wrap" style="display:none">
+          <select class="filter-sel" id="hist-user" onchange="loadHistory()">
+            <option value="">Все пользователи</option>
+          </select>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Дата / Время</th>
+              <th>Номер</th>
+              <th>Собеседник</th>
+              <th>Направление</th>
+              <th>Длительность</th>
+              <th id="hist-col-user" style="display:none">Пользователь</th>
+            </tr>
+          </thead>
+          <tbody id="hist-body">
+            <tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">Загрузка...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination">
+        <button class="btn btn-ghost btn-sm" onclick="histPage(-1)" id="hist-prev">← Назад</button>
+        <div class="pagination-info" id="hist-page-info">—</div>
+        <button class="btn btn-ghost btn-sm" onclick="histPage(1)" id="hist-next">Вперёд →</button>
+      </div>
+    </div>
+
+    <!-- ── ACCOUNTS ── -->
+    <div class="tab-pane" id="pane-accounts">
+      <div class="pane-header"><div class="pane-title">Аккаунты</div></div>
+      <div class="section" style="margin-bottom:16px">
+        <div class="section-head" style="cursor:default">
+          <span class="section-title">Регистрация пользователя</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+          <div style="display:flex;gap:10px">
+            <input class="modal-inp" id="reg-username" placeholder="Логин (минимум 3 символа)" style="flex:1">
+            <button class="btn btn-primary" onclick="registerUser()">Создать</button>
+          </div>
+          <div class="reg-result" id="reg-result">
+            <div style="color:var(--green);font-weight:700;margin-bottom:8px">✓ Пользователь создан</div>
+            <div style="font-size:13px;margin-bottom:4px">Логин: <strong id="res-login"></strong></div>
+            <div style="font-size:13px">Пароль: <span class="reg-password" id="res-password"></span></div>
+            <div class="reg-warn">⚠ Пароль показывается только один раз. Сохраните его.</div>
+          </div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Логин</th><th>Создан</th><th>Event Token</th></tr></thead>
+          <tbody id="users-list"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── TESTS ── -->
+    <div class="tab-pane" id="pane-tests">
+      <div class="pane-header"><div class="pane-title">Тест событий</div></div>
+      <div class="section">
+        <div class="section-head" style="cursor:default"><span class="section-title">Отправить тестовое событие</span></div>
+        <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end">
+          <div>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">IP сервера</div>
+            <input id="test-ip" class="modal-inp" placeholder="127.0.0.1">
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Событие</div>
+            <select id="test-state" class="filter-sel" style="width:100%"></select>
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Номер (local)</div>
+            <input id="test-local" class="modal-inp" placeholder="номер телефона">
+          </div>
+          <button class="btn btn-primary" onclick="sendTestEvent()">Отправить</button>
+        </div>
+        <div class="test-log" id="test-log"></div>
+      </div>
+
+      <div class="section" style="margin-top:16px">
+        <div class="section-head" style="cursor:default">
+          <span class="section-title">Настройка телефонов: Функции → Action URL</span>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+          <div style="font-size:13px;color:var(--text-dim);line-height:1.5">
+            Каждую строку — в одноимённое поле на странице телефона, затем «Сохранить».
+            Порядок строк = порядок полей на странице. Подписи — как в русской прошивке
+            (перевод там местами кривой, поэтому рядом английское имя события).
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end">
+            <div>
+              <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Адрес сервера (IP:порт)</div>
+              <input id="aurl-host" class="modal-inp" oninput="renderActionUrls()">
+            </div>
+            <div>
+              <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Токен пользователя (в чьей панели карточки)</div>
+              <select id="aurl-user" class="filter-sel" style="width:100%" onchange="renderActionUrls()"></select>
+            </div>
+            <button class="btn btn-ghost" onclick="copyAllActionUrls(this)">Скопировать все</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>№</th><th>Поле на телефоне</th><th>URL</th><th></th></tr></thead>
+              <tbody id="aurl-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="section" style="margin-top:16px">
+        <div class="section-head" style="cursor:default">
+          <span class="section-title">Последние события от телефонов</span>
+          <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="loadRecentEvents()">Обновить</button>
+        </div>
+        <div style="padding:16px">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Время</th><th>Событие</th><th>Номер</th><th>Собеседник</th><th>IP</th><th>Пользователь</th></tr></thead>
+              <tbody id="recent-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- SERVER UPDATED -->
+<div class="update-banner" id="update-banner">
+  <span>Сервер обновлён<span id="update-version"></span> — обновите страницу, чтобы получить новую версию панели.</span>
+  <button class="btn btn-primary btn-sm" onclick="location.reload()">Обновить</button>
+</div>
+
+<!-- EDIT MODAL -->
+<div class="backdrop" id="edit-backdrop" onclick="closeEditModal(event)">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title">Редактировать карточку</div>
+      <button class="btn btn-ghost btn-sm" onclick="closeEditModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <input class="modal-inp" id="edit-number" placeholder="Номер">
+      <input type="hidden" id="edit-original-number">
+      <input class="modal-inp" id="edit-name" placeholder="Название / кабинет">
+      <input class="modal-inp" id="edit-ip" placeholder="IP адрес">
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeEditModal()">Отмена</button>
+      <button class="btn btn-primary" onclick="saveEdit()">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ── State ──────────────────────────────────────────────────────
+let dragNumber = null;
+let socket = null;
+let currentUserInfo = null;
+let historyPage = 1;
+const historyPageSize = 25;
+let historyData = [];
+
+// card sizes from localStorage
+let cardSizes = {};
+try { const s = localStorage.getItem('__cardSizes'); if (s) cardSizes = JSON.parse(s); } catch(e){}
+
+// ── Helpers ─────────────────────────────────────────────────────
+const esc = v => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+// Аргумент для inline onclick: сначала JS-строка, потом HTML-экранирование.
+// Одного esc мало — браузер раскодирует &#39; обратно в ' до запуска JS,
+// и имя карточки вида  ');alert(1)//  выполнилось бы у всех, кто импортировал набор
+const jsArg = v => esc(JSON.stringify(String(v ?? '')));
+const $ = id => document.getElementById(id);
+
+const OFFLINE_STATES = ['OFFLINE', 'DND', 'Нет_регистрации'];
+const TALK_STATES = ['Разговор', 'Конференция'];
+
+function stateClass(state) {
+  if (!state) return '';
+  if (state === 'В_покое') return 'state-idle';
+  if (OFFLINE_STATES.includes(state)) return 'state-offline';
+  if (TALK_STATES.includes(state)) return 'state-talk';
+  return 'state-active';
+}
+function pillClass(state) {
+  if (state === 'В_покое') return 'pill-idle';
+  if (OFFLINE_STATES.includes(state)) return 'pill-offline';
+  if (TALK_STATES.includes(state)) return 'pill-talk';
+  return 'pill-active';
+}
+function prettyState(state) {
+  return (state || '').replaceAll('_', ' ');
+}
+function pingClass(ping) {
+  if (!ping || ping === '?') return 'ping-unknown';
+  if (ping.includes('ms')) return 'ping-ok';
+  return 'ping-fail';
+}
+function isActive(s) { return s && s !== 'В_покое' && !OFFLINE_STATES.includes(s); }
+function isIdle(s)   { return s === 'В_покое'; }
+function isOffline(s){ return OFFLINE_STATES.includes(s); }
+
+// Значки функций телефона (приходят из Action URL)
+function flagsHtml(p) {
+  const f = p.flags || {};
+  const out = [];
+  const add = (text, cls = '', title = '') =>
+    out.push(`<span class="flag ${cls}" title="${esc(title)}">${esc(text)}</span>`);
+
+  if (f.lines > 1) add(`📞 Линий: ${f.lines}`, '', 'Звонок на второй линии (вызов поверх разговора)');
+  if (f.dnd && p.state !== 'DND') add('🔕 DND', 'flag-warn', 'Не беспокоить включено');
+  const fwd = [f.fwd_always && 'всегда', f.fwd_busy && 'занято', f.fwd_noanswer && 'нет ответа'].filter(Boolean);
+  if (fwd.length) add(`↪ ${fwd.join(', ')}`, '', 'Переадресация включена');
+  if (f.mute) add('🔇 Микрофон выкл', 'flag-warn');
+  if (f.audio === 'headset') add('🎧 Гарнитура');
+  if (f.audio === 'handsfree') add('🔊 Громкая связь');
+  if (p.state !== 'Нет_регистрации') {
+    if (f.reg === 'fail') add('⚠ Ошибка регистрации', 'flag-warn');
+    if (f.reg === 'off') add('⚠ Не зарегистрирован', 'flag-warn');
+  }
+  if (f.missed) add(`📵 Пропущено: ${f.missed}`, 'flag-warn');
+  if (f.forwarded) add(`↪ Переадресовано: ${f.forwarded}`);
+  if (f.call_waiting === false) add('Ожидание вызова выкл', 'flag-muted');
+  if (f.vpn_ip) add('VPN', 'flag-muted', f.vpn_ip);
+  return out.length ? `<div class="card-flags">${out.join('')}</div>` : '';
+}
+function lastEventTitle(p) {
+  const f = p.flags || {};
+  return f.last_event ? `Последнее событие: ${f.last_event} · ${f.last_event_time}` : '';
+}
+
+// ── Socket ──────────────────────────────────────────────────────
+function initSocket() {
+  if (typeof io === 'undefined') { startPolling(); return; }
+  socket = io();
+  socket.on('connect', () => {
+    setConn('online');
+    stopPolling();
+    refreshPhones();
+  });
+  socket.on('disconnect', () => { setConn('offline'); startPolling(); });
+  socket.on('connect_error', () => { setConn('error'); startPolling(); });
+  socket.on('phones_update', () => { refreshPhones(); scheduleRecentEvents(); });
+  socket.on('server_version', onServerVersion);
+}
+
+// Версию запоминаем при первом подключении (в HTML не зашиваем); пришла другая
+// после переподключения — сервер обновили, старый JS страницы надо перезагрузить
+let knownServerVersion = null;
+function onServerVersion(d) {
+  const v = d && d.version;
+  if (!v) return;
+  if (knownServerVersion === null) { knownServerVersion = v; return; }
+  if (v !== knownServerVersion) {
+    $('update-version').textContent = ` до ${v}`;
+    $('update-banner').classList.add('visible');
+  }
+}
+
+function setConn(state) {
+  const dot = $('conn-dot'), txt = $('conn-text');
+  dot.className = 'conn-dot';
+  if (state === 'online')  { txt.textContent = 'Онлайн'; }
+  if (state === 'offline') { dot.classList.add('offline'); txt.textContent = 'Отключено'; }
+  if (state === 'error')   { dot.classList.add('error'); txt.textContent = 'Ошибка'; }
+}
+
+let pollingTimer = null;
+function startPolling() { if (!pollingTimer) pollingTimer = setInterval(refreshPhones, 5000); }
+function stopPolling()  { if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; } }
+
+// ── Duration ticker ───────────────────────────────────────────────
+const _callStarts = {};  // number → unix timestamp (seconds)
+
+function _fmtDur(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(s).padStart(2, '0');
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [num, ts] of Object.entries(_callStarts)) {
+    const el = document.querySelector(`.card[data-number="${CSS.escape(num)}"] .duration`);
+    if (el) el.textContent = _fmtDur(Math.max(0, Math.floor((now - ts) / 1000)));
+  }
+}, 1000);
+
+// ── Data refresh ─────────────────────────────────────────────────
+let refreshing = false;
+let refreshPending = false;  // событие пришло во время fetch — перечитать после
+async function refreshPhones() {
+  if (refreshing) { refreshPending = true; return; }
+  refreshing = true;
+  try {
+    const res = await fetch('/phones');
+    if (res.status === 401) { location.href = '/login'; return; }
+    const json = await res.json();
+    const phones = Array.isArray(json) ? json : (json.phones ?? []);
+    renderMonitoring(phones);
+  } catch(e) {}
+  finally {
+    refreshing = false;
+    if (refreshPending) { refreshPending = false; refreshPhones(); }
+  }
+}
+
+function renderMonitoring(phones) {
+  // обновляем карту для тикера: храним клиентский timestamp начала
+  // чтобы не зависеть от расхождения часов сервера и браузера
+  const activeNums = new Set();
+  const clientNow = Date.now();
+  phones.forEach(p => {
+    if (p.duration_sec != null) {
+      _callStarts[p.number] = clientNow - p.duration_sec * 1000;
+      activeNums.add(p.number);
+    }
+  });
+  Object.keys(_callStarts).forEach(n => { if (!activeNums.has(n)) delete _callStarts[n]; });
+
+  // stats
+  let active = 0, idle = 0, offline = 0;
+  phones.forEach(p => {
+    if (isActive(p.state)) active++;
+    else if (isIdle(p.state)) idle++;
+    else offline++;
+  });
+  $('h-active').textContent = active;
+  $('h-idle').textContent = idle;
+  $('h-offline').textContent = offline;
+  $('h-total').textContent = phones.length;
+  $('nav-cnt').textContent = phones.length;
+
+  const groups = { active: [], idle: [], offline: [] };
+  phones.forEach(p => {
+    if (isActive(p.state)) groups.active.push(p);
+    else if (isIdle(p.state)) groups.idle.push(p);
+    else groups.offline.push(p);
+  });
+
+  const wrap = $('sections-wrap');
+  const defs = [
+    { key:'active', icon:'🔴', title:'Активные', items: groups.active },
+    { key:'idle',   icon:'🟢', title:'В покое',  items: groups.idle },
+    { key:'offline',icon:'⚫', title:'Offline',   items: groups.offline },
+  ];
+
+  // preserve collapse state
+  const collapsed = {};
+  wrap.querySelectorAll('.section').forEach(s => {
+    collapsed[s.dataset.key] = s.classList.contains('collapsed');
+  });
+
+  wrap.innerHTML = defs.map(d => {
+    const isCollapsed = collapsed[d.key] ?? false;
+    const bodyHtml = d.items.length === 0
+      ? `<div class="section-empty">Нет абонентов</div>`
+      : `<div class="section-body">${d.items.map(p => cardHtml(p)).join('')}</div>`;
+    return `
+      <div class="section ${isCollapsed?'collapsed':''}" data-key="${d.key}">
+        <div class="section-head" onclick="toggleSection(this.parentElement)">
+          <span class="section-icon">${d.icon}</span>
+          <span class="section-title">${d.title}</span>
+          <span class="section-cnt">${d.items.length}</span>
+          <span class="section-toggle">▾</span>
+        </div>
+        ${bodyHtml}
+      </div>`;
+  }).join('');
+
+  // bind drag events
+  wrap.querySelectorAll('.card').forEach(bindCard);
+}
+
+function toggleSection(el) {
+  el.classList.toggle('collapsed');
+}
+
+function cardHtml(p) {
+  const sc = stateClass(p.state);
+  const pc = pillClass(p.state);
+  const pgc = pingClass(p.ping);
+  const hasPeer = p.peer && p.peer !== '-' && p.peer !== 'Не определен';
+
+  return `
+<div class="card ${sc}" data-number="${esc(p.number)}" draggable="true">
+  <div class="card-inner">
+    <div class="card-top">
+      <div class="card-info">
+        <div class="card-name">${esc(p.name)}</div>
+        <div class="card-meta">${esc(p.number)} · ${esc(p.ip || '—')}</div>
+      </div>
+      <div class="status-pill ${pc}" title="${esc(lastEventTitle(p))}">${esc(prettyState(p.state))}</div>
+    </div>
+    ${flagsHtml(p)}
+    <div class="card-call">
+      <div class="call-block">
+        <div class="call-label">Собеседник</div>
+        <div class="call-val">${esc(hasPeer ? p.peer : '—')}</div>
+      </div>
+      <div class="call-block">
+        <div class="call-label">Длительность</div>
+        <div class="call-val duration">${esc(p.duration || '00:00')}</div>
+      </div>
+    </div>
+    <div class="card-bottom">
+      <span class="card-ping ${pgc}">${esc(p.ping || '?')}</span>
+      <span class="card-time">${esc(p.time && p.time !== '-' ? p.time : '')}</span>
+      <div class="card-acts">
+        <button class="btn btn-ghost btn-xs" onclick="openEdit(${jsArg(p.number)},${jsArg(p.name)},${jsArg(p.ip)})">✎</button>
+        <button class="btn btn-danger btn-xs" onclick="deletePhone(${jsArg(p.number)})">✕</button>
+      </div>
+    </div>
+  </div>
+</div>`;
+}
+
+// ── Drag & Drop ──────────────────────────────────────────────────
+function bindCard(card) {
+  card.addEventListener('dragstart', e => {
+    dragNumber = card.dataset.number;
+    card.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  card.addEventListener('dragend', () => {
+    card.classList.remove('dragging');
+  });
+  card.addEventListener('dragover', e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
+  card.addEventListener('drop', e => {
+    e.preventDefault();
+    const targetNumber = card.dataset.number;
+    if (!dragNumber || dragNumber === targetNumber) return;
+    reorderCards(dragNumber, targetNumber);
+    dragNumber = null;
+  });
+}
+
+async function reorderCards(fromNum, toNum) {
+  const allCards = [...document.querySelectorAll('.card')];
+  const order = allCards.map(c => c.dataset.number);
+  const fromIdx = order.indexOf(fromNum);
+  const toIdx   = order.indexOf(toNum);
+  if (fromIdx === -1 || toIdx === -1) return;
+  order.splice(fromIdx, 1);
+  order.splice(toIdx, 0, fromNum);
+  await fetch('/reorder', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(order) });
+  refreshPhones();
+}
+
+// ── Phone CRUD ───────────────────────────────────────────────────
+async function addPhone() {
+  const number = $('new-number').value.trim();
+  const name   = $('new-name').value.trim();
+  const ip     = $('new-ip').value.trim();
+  if (!number) { alert('Укажите номер'); return; }
+  const res = await fetch('/add_phone', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({number, name, ip})
+  });
+  const data = await res.json();
+  if (data.ok) {
+    $('new-number').value = '';
+    $('new-name').value = '';
+    $('new-ip').value = '';
+    refreshPhones();
+  } else { alert(data.error || 'Ошибка'); }
+}
+
+async function deletePhone(number) {
+  if (!confirm(`Удалить ${number}?`)) return;
+  await fetch('/delete_phone', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({number}) });
+  refreshPhones();
+}
+
+function openEdit(number, name, ip) {
+  $('edit-number').value = number;
+  $('edit-original-number').value = number;
+  $('edit-name').value = name;
+  $('edit-ip').value = ip;
+  $('edit-backdrop').classList.add('open');
+}
+function closeEditModal(e) {
+  if (e && e.target !== $('edit-backdrop')) return;
+  $('edit-backdrop').classList.remove('open');
+}
+async function saveEdit() {
+  const old_number = $('edit-original-number').value;
+  const number = $('edit-number').value.trim();
+  const name   = $('edit-name').value.trim();
+  const ip     = $('edit-ip').value.trim();
+  const res = await fetch('/update_phone', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({old_number, number, name, ip})
+  });
+  const data = await res.json();
+  if (data.ok) { $('edit-backdrop').classList.remove('open'); refreshPhones(); }
+  else alert(data.error || 'Ошибка');
+}
+
+// ── Tabs ─────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  $(`pane-${name}`).classList.add('active');
+  $(`tab-btn-${name}`).classList.add('active');
+  if (name === 'history')  loadHistory();
+  if (name === 'library')  { loadLibrary(); loadSharedStatus(); }
+  if (name === 'accounts') loadUsers();
+  if (name === 'tests')    { initActionUrlTab(); loadRecentEvents(); }
+}
+
+// ── Logout ───────────────────────────────────────────────────────
+async function logout() {
+  await fetch('/logout', {method:'POST'});
+  location.href = '/login';
+}
+
+// ── Library ──────────────────────────────────────────────────────
+async function loadSharedStatus() {
+  const res = await fetch('/my_shared_status');
+  const d = await res.json();
+  const btn = $('shared-toggle-btn');
+  btn.textContent = d.shared ? '🔒 Сделать приватным' : '🌐 Сделать общим';
+  btn.className = `btn btn-sm ${d.shared ? 'btn-danger' : 'btn-ghost'}`;
+}
+async function toggleShared() {
+  await fetch('/toggle_shared', {method:'POST'});
+  loadSharedStatus();
+}
+async function loadLibrary() {
+  const res = await fetch('/shared_sets');
+  const d = await res.json();
+  const wrap = $('library-body');
+  if (!d.sets || d.sets.length === 0) {
+    wrap.innerHTML = '<div style="color:var(--text-muted);font-size:13px">Нет общих наборов</div>';
+    return;
+  }
+  wrap.innerHTML = d.sets.map(s => `
+    <div class="lib-set">
+      <div>
+        <div class="lib-user">${esc(s.username)}</div>
+        <div class="lib-count">${s.count} карточек</div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="importSet(${jsArg(s.username)})">Импортировать</button>
+    </div>`).join('');
+}
+async function importSet(username) {
+  const res = await fetch('/import_set', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username})
+  });
+  const d = await res.json();
+  if (d.ok) alert(`Импортировано: ${d.imported}, пропущено: ${d.skipped}`);
+  else alert(d.error || 'Ошибка');
+}
+
+// ── History ──────────────────────────────────────────────────────
+async function loadHistory() {
+  historyPage = 1;
+  const number = $('hist-number').value;
+  const date   = $('hist-date').value;
+  const user   = $('hist-user')?.value || '';
+  try {
+    let url = `/history?page=${historyPage}&per_page=${historyPageSize}`;
+    if (number) url += `&number=${encodeURIComponent(number)}`;
+    if (date)   url += `&date=${encodeURIComponent(date)}`;
+    if (user)   url += `&user=${encodeURIComponent(user)}`;
+    const res = await fetch(url);
+    if (!res.ok) { renderHistEmpty(); return; }
+    const d = await res.json();
+    renderHistory(d);
+  } catch(e) { renderHistEmpty(); }
+}
+function histPage(dir) {
+  historyPage = Math.max(1, historyPage + dir);
+  loadHistoryPage();
+}
+async function loadHistoryPage() {
+  const number = $('hist-number').value;
+  const date   = $('hist-date').value;
+  const user   = $('hist-user')?.value || '';
+  let url = `/history?page=${historyPage}&per_page=${historyPageSize}`;
+  if (number) url += `&number=${encodeURIComponent(number)}`;
+  if (date)   url += `&date=${encodeURIComponent(date)}`;
+  if (user)   url += `&user=${encodeURIComponent(user)}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const d = await res.json();
+    renderHistory(d);
+  } catch(e) {}
+}
+function renderHistory(d) {
+  const tbody = $('hist-body');
+  const rows = d.items || d.records || d.history || [];
+  const total = d.total ?? rows.length;
+  const pages = Math.ceil(total / historyPageSize) || 1;
+
+  if (rows.length === 0) { renderHistEmpty(); return; }
+
+  tbody.innerHTML = rows.map(r => {
+    const dirClass = r.direction === 'in' ? 'dir-in' : 'dir-out';
+    const dirLabel = r.direction === 'in' ? '↙ Входящий' : '↗ Исходящий';
+    return `<tr>
+      <td class="mono">${esc(r.datetime || r.time || (r.ts_start ? new Date(r.ts_start * 1000).toLocaleString('ru') : '—'))}</td>
+      <td>${esc(r.number || r.local || '—')}</td>
+      <td>${esc(r.peer || r.remote || '—')}</td>
+      <td class="${dirClass}">${dirLabel}</td>
+      <td class="mono">${esc(r.duration || '—')}</td>
+      ${currentUserInfo?.is_admin ? `<td>${esc(r.user || '—')}</td>` : ''}
+    </tr>`;
+  }).join('');
+
+  $('hist-page-info').textContent = `Стр. ${historyPage} / ${pages} · ${total} записей`;
+  $('hist-prev').disabled = historyPage <= 1;
+  $('hist-next').disabled = historyPage >= pages;
+}
+function renderHistEmpty() {
+  $('hist-body').innerHTML = `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">Нет данных</td></tr>`;
+  $('hist-page-info').textContent = '—';
+}
+
+// ── Accounts ─────────────────────────────────────────────────────
+async function loadUsers() {
+  const res = await fetch('/admin/users');
+  if (!res.ok) return;
+  const d = await res.json();
+  if (!d.ok) return;
+  $('users-list').innerHTML = d.users.map(u => `
+    <tr>
+      <td>${esc(u.username)}</td>
+      <td class="mono">${esc(u.created_at || '—')}</td>
+      <td><span class="token-box">${esc(u.event_token || '—')}</span></td>
+    </tr>`).join('');
+}
+async function registerUser() {
+  const username = $('reg-username').value.trim();
+  if (!username) return;
+  const res = await fetch('/register', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username})
+  });
+  const d = await res.json();
+  if (d.ok) {
+    $('res-login').textContent = username;
+    $('res-password').textContent = d.password;
+    $('reg-result').classList.add('visible');
+    $('reg-username').value = '';
+    loadUsers();
+  } else { alert(d.error || 'Ошибка'); }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+async function sendTestEvent() {
+  const ip    = $('test-ip').value.trim();
+  const state = $('test-state').value;
+  const local = $('test-local').value.trim();
+  if (!ip || !local) { alert('Заполните IP и номер'); return; }
+
+  let token = '';
+  if (currentUserInfo) token = currentUserInfo.event_token || '';
+
+  const url = `http://${ip}:8000/event?token=${encodeURIComponent(token)}&state=${encodeURIComponent(state)}&local=${encodeURIComponent(local)}`;
+  const log = $('test-log');
+  log.classList.add('visible');
+
+  try {
+    const res = await fetch(url);
+    const text = await res.text();
+    log.textContent += `[${new Date().toLocaleTimeString()}] ${state} → ${local} : ${res.status} ${text}\n`;
+  } catch(e) {
+    log.textContent += `[${new Date().toLocaleTimeString()}] Ошибка: ${e.message}\n`;
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+// ── Action URL ────────────────────────────────────────────────────
+let actionUrlEvents = [];
+let aurlUsers = [];
+let serverIp = '';
+
+function defaultServerHost() {
+  // Панель открыта на самом сервере — телефонам нужен его адрес в локалке
+  if (serverIp && !serverIp.startsWith('127.')
+      && ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname))
+    return `${serverIp}:${location.port || 80}`;
+  return location.host;
+}
+
+async function initActionUrlTab() {
+  if (!actionUrlEvents.length) {
+    try {
+      const res = await fetch('/action_url_events');
+      if (res.ok) {
+        const d = await res.json();
+        actionUrlEvents = d.events || [];
+        serverIp = d.server_ip || '';
+      }
+    } catch(e) {}
+    $('test-state').innerHTML = actionUrlEvents.map(e =>
+      `<option value="${esc(e.key)}">${esc(e.ru)} — ${esc(e.en)}</option>`).join('');
+    $('test-state').value = 'incoming_call';
+  }
+  if (!$('aurl-host').value) $('aurl-host').value = defaultServerHost();
+  if (!$('test-ip').value) $('test-ip').value = location.hostname;
+  try {
+    const d = await (await fetch('/admin/users')).json();
+    if (d.ok) aurlUsers = d.users;
+  } catch(e) {}
+  const sel = $('aurl-user');
+  const prev = sel.value || currentUserInfo?.username;
+  sel.innerHTML = aurlUsers.map(u =>
+    `<option value="${esc(u.username)}">${esc(u.username)}</option>`).join('');
+  if (prev) sel.value = prev;
+  renderActionUrls();
+}
+
+// $active_user, $remote, $ip, $mac, $call_id — переменные Yealink, телефон подставит сам
+function actionUrlFor(key) {
+  const host = $('aurl-host').value.trim() || defaultServerHost();
+  const user = aurlUsers.find(u => u.username === $('aurl-user').value);
+  const token = encodeURIComponent(user?.event_token || currentUserInfo?.event_token || '');
+  return `http://${host}/event?token=${token}&state=${key}&local=$active_user&remote=$remote&ip=$ip&mac=$mac&call_id=$call_id`;
+}
+
+function renderActionUrls() {
+  $('aurl-body').innerHTML = actionUrlEvents.map((e, i) => `
+    <tr>
+      <td class="mono">${i + 1}</td>
+      <td>${esc(e.ru)}<div class="aurl-en">${esc(e.en)}</div></td>
+      <td class="aurl-url">${esc(actionUrlFor(e.key))}</td>
+      <td><button class="btn btn-ghost btn-xs" onclick="copyActionUrl(${i}, this)">Копировать</button></td>
+    </tr>`).join('');
+}
+
+// navigator.clipboard есть только на HTTPS/localhost, панель обычно по HTTP в локалке
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch(e) {}
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch(e) {}
+  ta.remove();
+  return ok;
+}
+function flashCopied(btn, ok) {
+  btn.dataset.label ??= btn.textContent;
+  btn.textContent = ok ? '✓ Скопировано' : 'Не удалось';
+  setTimeout(() => { btn.textContent = btn.dataset.label; }, 1500);
+}
+async function copyActionUrl(i, btn) {
+  flashCopied(btn, await copyText(actionUrlFor(actionUrlEvents[i].key)));
+}
+async function copyAllActionUrls(btn) {
+  const text = actionUrlEvents
+    .map((e, i) => `${i + 1}. ${e.ru} (${e.en})\n${actionUrlFor(e.key)}`).join('\n\n');
+  flashCopied(btn, await copyText(text));
+}
+
+// ── Журнал событий ────────────────────────────────────────────────
+let recentTimer = null;
+function scheduleRecentEvents() {
+  if (!$('pane-tests').classList.contains('active')) return;
+  clearTimeout(recentTimer);
+  recentTimer = setTimeout(loadRecentEvents, 300);
+}
+function resolvedNote(e) {
+  if (!e.number) return '<div class="aurl-en">номер не определён</div>';
+  const by = {mac: 'по MAC', ip: 'по IP карточки'}[e.resolved_by];
+  return by ? `<div class="aurl-en">${by}</div>` : '';
+}
+async function loadRecentEvents() {
+  try {
+    const res = await fetch('/recent_events');
+    if (!res.ok) return;
+    const rows = (await res.json()).events || [];
+    $('recent-body').innerHTML = rows.length ? rows.map(e => `
+      <tr class="${e.known ? '' : 'ev-unknown'}">
+        <td class="mono">${esc(e.time)}</td>
+        <td>${esc(e.label)}<div class="aurl-en">${esc(e.key ?? '—')}${e.call_id ? ' · call ' + esc(e.call_id) : ''}</div></td>
+        <td class="mono">${esc(e.number || '—')}${resolvedNote(e)}</td>
+        <td>${esc(e.remote || '—')}</td>
+        <td class="mono">${esc(e.ip || '—')}</td>
+        <td>${esc(e.user)}</td>
+      </tr>`).join('')
+      : `<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-muted)">Событий пока не было</td></tr>`;
+  } catch(e) {}
+}
+
+// ── User info & init ──────────────────────────────────────────────
+async function initUserInfo() {
+  try {
+    const res = await fetch('/user_info');
+    if (!res.ok) return;
+    currentUserInfo = await res.json();
+    $('nav-user').textContent = currentUserInfo.username;
+    if (currentUserInfo.is_admin) {
+      $('tab-btn-accounts').style.display = '';
+      $('tab-btn-tests').style.display = '';
+      $('hist-col-user').style.display = '';
+      $('hist-user-wrap').style.display = '';
+    }
+    // populate hist number filter
+    const _pj = await (await fetch('/phones')).json();
+    const phones = Array.isArray(_pj) ? _pj : (_pj.phones ?? []);
+    const sel = $('hist-number');
+    phones.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.number;
+      opt.textContent = `${p.number} — ${p.name}`;
+      sel.appendChild(opt);
+    });
+  } catch(e) {}
+}
+
+// ── Boot ─────────────────────────────────────────────────────────
+(async function() {
+  await initUserInfo();
+  initSocket();
+  refreshPhones();
+  $('conn-dot').className = 'conn-dot';
+  $('conn-text').textContent = 'Онлайн';
+})();
+
+// ESC to close modal
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') $('edit-backdrop').classList.remove('open');
+});
+</script>
+</body>
+</html>
