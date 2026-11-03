@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>SIP Monitor by Стёпчик SVL 1.1</title>
+<title>SIP Monitor by Стёпчик SVL 1.1.1</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="/static/socket.io.min.js"></script>
@@ -771,6 +771,13 @@ tbody td:first-child { color: var(--text); }
   color: var(--text-dim);
 }
 .aurl-en { font-size: 11px; color: var(--text-muted); }
+.aurl-controls { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;align-items:end; }
+.aurl-controls label { display:block;font-size:11px;color:var(--text-dim);margin-bottom:5px; }
+.aurl-status { font-size:12px;color:var(--text-dim);line-height:1.5; }
+.aurl-status.error { color:#fca5a5; }
+.aurl-auto-note { font-size:12px;color:var(--orange);line-height:1.5; }
+.aurl-details { margin-top:5px;font-size:11px;color:var(--text-dim);word-break:break-word; }
+.aurl-details summary { cursor:pointer; }
 .ev-unknown td { color: #fca5a5; }
 
 /* ─── RESPONSIVE ─── */
@@ -823,7 +830,7 @@ tbody td:first-child { color: var(--text); }
       </div>
       <div>
         <div class="logo-name">SIP Monitor</div>
-        <div class="logo-ver">Rel 1.1</div>
+        <div class="logo-ver">Rel 1.1.1</div>
       </div>
     </div>
 
@@ -1020,21 +1027,41 @@ tbody td:first-child { color: var(--text); }
         </div>
         <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
           <div style="font-size:13px;color:var(--text-dim);line-height:1.5">
-            Каждую строку — в одноимённое поле на странице телефона, затем «Сохранить».
-            Порядок строк = порядок полей на странице. Подписи — как в русской прошивке
-            (перевод там местами кривой, поэтому рядом английское имя события).
+            Для телефона с одним SIP-номером выберите его карточку: номер попадёт во все 48 URL.
+            Для общей DECT-базы или нескольких SIP-аккаунтов выберите «Авто» — номер подставит телефон.
+            Для Yealink скачайте CFG и импортируйте его в веб-интерфейсе телефона:
+            <strong>Настройки → Конфигурация → Импорт CFG</strong>.
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end">
+          <div class="aurl-controls">
             <div>
-              <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Адрес сервера (IP:порт)</div>
-              <input id="aurl-host" class="modal-inp" oninput="renderActionUrls()">
+              <label for="aurl-host">Адрес сервера (IP:порт или https://адрес)</label>
+              <input id="aurl-host" class="modal-inp" oninput="renderActionUrls()" placeholder="192.168.1.10:8000" spellcheck="false">
             </div>
             <div>
-              <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Токен пользователя (в чьей панели карточки)</div>
-              <select id="aurl-user" class="filter-sel" style="width:100%" onchange="renderActionUrls()"></select>
+              <label for="aurl-user">Пользователь (в чьей панели карточка)</label>
+              <select id="aurl-user" class="filter-sel" style="width:100%" onchange="loadActionUrlPhones()"></select>
             </div>
-            <button class="btn btn-ghost" onclick="copyAllActionUrls(this)">Скопировать все</button>
+            <div>
+              <label for="aurl-number">Номер этого телефона</label>
+              <select id="aurl-number" class="filter-sel" style="width:100%" onchange="renderActionUrls()">
+                <option value="">Выберите номер</option>
+              </select>
+            </div>
           </div>
+          <div id="aurl-auto-note" class="aurl-auto-note" hidden>
+            Авто: телефон должен подставлять $active_user. Если номер пустой, сервер ищет его по
+            IP карточки или MAC, выученному после события с номером. Привязка MAC теряется при
+            перезапуске; у общей DECT-базы номер может быть неоднозначен. Если телефон не передаёт
+            номер, часть событий базы не удастся привязать к отдельной трубке.
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:10px">
+            <button class="btn btn-primary" id="aurl-download" onclick="downloadActionUrlConfig()" disabled>Скачать CFG для Yealink</button>
+            <button class="btn btn-ghost" id="aurl-copy-all" onclick="copyAllActionUrls(this)" disabled>Скопировать все URL</button>
+          </div>
+          <div class="aurl-status">CFG использует параметры Yealink T53; совместимость зависит от модели и прошивки.
+            Импорт в ТЕЛТА «Спектр-101» пока не подтверждён. Для ручной настройки копируйте URL
+            в одноимённые поля телефона и сохраните изменения.</div>
+          <div id="aurl-status" class="aurl-status" role="status" aria-live="polite"></div>
           <div class="table-wrap">
             <table>
               <thead><tr><th>№</th><th>Поле на телефоне</th><th>URL</th><th></th></tr></thead>
@@ -1623,6 +1650,10 @@ async function sendTestEvent() {
 // ── Action URL ────────────────────────────────────────────────────
 let actionUrlEvents = [];
 let aurlUsers = [];
+let aurlPhones = [];
+let aurlCatalogUser = '';
+let aurlLoading = false;
+let aurlRequest = 0;
 let serverIp = '';
 
 function defaultServerHost() {
@@ -1634,49 +1665,167 @@ function defaultServerHost() {
 }
 
 async function initActionUrlTab() {
-  if (!actionUrlEvents.length) {
+  if (!$('test-ip').value) $('test-ip').value = location.hostname;
+  let users = currentUserInfo ? [currentUserInfo] : [];
+  if (currentUserInfo?.is_admin) {
     try {
-      const res = await fetch('/action_url_events');
+      const res = await fetch('/admin/users');
       if (res.ok) {
         const d = await res.json();
-        actionUrlEvents = d.events || [];
-        serverIp = d.server_ip || '';
+        if (d.ok && Array.isArray(d.users)) users = d.users;
       }
     } catch(e) {}
-    $('test-state').innerHTML = actionUrlEvents.map(e =>
-      `<option value="${esc(e.key)}">${esc(e.ru)} — ${esc(e.en)}</option>`).join('');
-    $('test-state').value = 'incoming_call';
   }
-  if (!$('aurl-host').value) $('aurl-host').value = defaultServerHost();
-  if (!$('test-ip').value) $('test-ip').value = location.hostname;
-  try {
-    const d = await (await fetch('/admin/users')).json();
-    if (d.ok) aurlUsers = d.users;
-  } catch(e) {}
+  aurlUsers = users;
   const sel = $('aurl-user');
   const prev = sel.value || currentUserInfo?.username;
   sel.innerHTML = aurlUsers.map(u =>
     `<option value="${esc(u.username)}">${esc(u.username)}</option>`).join('');
-  if (prev) sel.value = prev;
-  renderActionUrls();
+  sel.value = aurlUsers.some(u => u.username === prev) ? prev : (aurlUsers[0]?.username || '');
+  if (aurlCatalogUser === sel.value && !aurlLoading && actionUrlEvents.length) renderActionUrls();
+  else await loadActionUrlPhones();
 }
 
-// $active_user, $remote, $ip, $mac, $call_id — переменные Yealink, телефон подставит сам
+function actionUrlStatus(message, error = false) {
+  $('aurl-status').textContent = message;
+  $('aurl-status').classList[error ? 'add' : 'remove']('error');
+}
+
+async function loadActionUrlPhones() {
+  const requestId = ++aurlRequest;
+  const username = $('aurl-user').value;
+  aurlLoading = true;
+  aurlCatalogUser = '';
+  aurlPhones = [];
+  $('aurl-number').innerHTML = '<option value="">Загрузка карточек…</option>';
+  $('aurl-number').value = '';
+  $('aurl-number').disabled = true;
+  renderActionUrls();
+  try {
+    if (!username) throw new Error('Выберите пользователя.');
+    const res = await fetch(`/action_url_events?username=${encodeURIComponent(username)}`);
+    if (!res.ok) throw new Error('Не удалось загрузить карточки. Повторно выберите пользователя.');
+    const d = await res.json();
+    if (requestId !== aurlRequest || username !== $('aurl-user').value) return;
+    if (!Array.isArray(d.events) || !Array.isArray(d.phones)
+        || (d.username && d.username !== username))
+      throw new Error('Сервер не вернул список карточек. Обновите страницу.');
+    actionUrlEvents = d.events;
+    aurlPhones = d.phones;
+    aurlCatalogUser = username;
+    serverIp = d.server_ip || '';
+    if (!$('aurl-host').value) {
+      const scheme = location.protocol === 'https:' ? 'https:' : 'http:';
+      $('aurl-host').value = `${scheme}//${defaultServerHost()}`;
+    }
+    const previousTest = $('test-state').value;
+    $('test-state').innerHTML = actionUrlEvents.map(e =>
+      `<option value="${esc(e.key)}">${esc(e.ru)} — ${esc(e.en)}</option>`).join('');
+    $('test-state').value = actionUrlEvents.some(e => e.key === previousTest) ? previousTest : 'incoming_call';
+    $('aurl-number').innerHTML = '<option value="">Выберите номер</option>'
+      + aurlPhones.map(p => `<option value="${esc(p.number)}">${esc(p.number)} — ${esc(p.name || p.ip || '')}</option>`).join('')
+      + '<option value="__auto__">Авто ($active_user)</option>';
+    $('aurl-number').value = '';
+    $('aurl-number').disabled = false;
+  } catch(e) {
+    if (requestId !== aurlRequest || username !== $('aurl-user').value) return;
+    aurlLoading = false;
+    renderActionUrls();
+    actionUrlStatus(e.message, true);
+    return;
+  } finally {
+    if (requestId === aurlRequest) aurlLoading = false;
+  }
+  if (requestId === aurlRequest && username === $('aurl-user').value) renderActionUrls();
+}
+
+function actionUrlOrigin() {
+  const raw = $('aurl-host').value || defaultServerHost();
+  const message = 'Укажите только адрес сервера: IP:порт или http(s)://адрес:порт, без пути и логина.';
+  if (/[\u0000-\u001f\u007f]/.test(raw)) throw new Error(message);
+  const input = raw.trim();
+  if (!input || /\s/.test(input) || input.includes('\\')) throw new Error(message);
+  let url;
+  try { url = new URL(input.includes('://') ? input : `http://${input}`); }
+  catch(e) { throw new Error(message); }
+  if (!['http:', 'https:'].includes(url.protocol) || !url.hostname
+      || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
+    throw new Error(message);
+  return url.origin;
+}
+
+// Макросы остаются буквальными: их подставляет телефон при отправке события.
 function actionUrlFor(key) {
-  const host = $('aurl-host').value.trim() || defaultServerHost();
-  const user = aurlUsers.find(u => u.username === $('aurl-user').value);
-  const token = encodeURIComponent(user?.event_token || currentUserInfo?.event_token || '');
-  return `http://${host}/event?token=${token}&state=${key}&local=$active_user&remote=$remote&ip=$ip&mac=$mac&call_id=$call_id`;
+  const username = $('aurl-user').value;
+  if (aurlLoading) throw new Error('Загрузка карточек…');
+  if (!username || aurlCatalogUser !== username) throw new Error('Выберите пользователя и дождитесь загрузки карточек.');
+  const user = aurlUsers.find(u => u.username === username);
+  if (!user?.event_token) throw new Error('Для выбранного пользователя не найден токен. Обновите страницу.');
+  const selected = $('aurl-number').value;
+  if (!selected) throw new Error('Выберите номер этого телефона или режим «Авто».');
+  if (selected !== '__auto__') {
+    const phone = aurlPhones.find(p => String(p.number) === selected);
+    if (!phone) throw new Error('Выберите номер из карточек выбранного пользователя.');
+    const ip = String(phone.ip || '').trim();
+    if (ip && aurlPhones.some(p => String(p.number) !== selected && String(p.ip || '').trim() === ip))
+      throw new Error('Несколько карточек имеют общий IP. Для DECT-базы или нескольких SIP-аккаунтов используйте «Авто», чтобы не приписать все события одному номеру.');
+  }
+  if (!actionUrlEvents.some(e => e.key === key)) throw new Error('Событие отсутствует в каталоге.');
+  const local = selected === '__auto__' ? '$active_user' : encodeURIComponent(selected);
+  const url = `${actionUrlOrigin()}/event?token=${encodeURIComponent(user.event_token)}&state=${encodeURIComponent(key)}&local=${local}&remote=$remote&called_number=$calledNumber&ip=$ip&mac=$mac&call_id=$call_id&model=$model&firmware=$firmware`;
+  if (url.length > 511) throw new Error(`URL содержит ${url.length} символов, лимит телефона — 511. Сократите адрес сервера.`);
+  return url;
 }
 
 function renderActionUrls() {
-  $('aurl-body').innerHTML = actionUrlEvents.map((e, i) => `
-    <tr>
-      <td class="mono">${i + 1}</td>
-      <td>${esc(e.ru)}<div class="aurl-en">${esc(e.en)}</div></td>
-      <td class="aurl-url">${esc(actionUrlFor(e.key))}</td>
-      <td><button class="btn btn-ghost btn-xs" onclick="copyActionUrl(${i}, this)">Копировать</button></td>
-    </tr>`).join('');
+  $('aurl-auto-note').hidden = $('aurl-number').value !== '__auto__';
+  let valid = false;
+  try {
+    if (!actionUrlEvents.length) throw new Error(aurlLoading ? 'Загрузка карточек…' : 'Каталог событий ещё не загружен.');
+    const urls = actionUrlEvents.map(e => actionUrlFor(e.key));
+    $('aurl-body').innerHTML = actionUrlEvents.map((e, i) => `
+      <tr>
+        <td class="mono">${i + 1}</td>
+        <td>${esc(e.ru)}<div class="aurl-en">${esc(e.en)}</div></td>
+        <td class="aurl-url">${esc(urls[i])}</td>
+        <td><button class="btn btn-ghost btn-xs" onclick="copyActionUrl(${i}, this)">Копировать</button></td>
+      </tr>`).join('');
+    actionUrlStatus(`Готовы ${urls.length} URL. Номер: ${$('aurl-number').value === '__auto__' ? 'Авто' : $('aurl-number').value}.`);
+    valid = true;
+  } catch(e) {
+    $('aurl-body').innerHTML = '';
+    actionUrlStatus(e.message, !aurlLoading && !!$('aurl-number').value);
+  }
+  $('aurl-copy-all').disabled = !valid;
+  $('aurl-download').disabled = !valid;
+}
+
+function buildActionUrlConfig() {
+  if (!actionUrlEvents.length) throw new Error('Каталог событий ещё не загружен.');
+  const parameters = new Set();
+  const lines = actionUrlEvents.map(event => {
+    if (!/^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$/.test(event.parameter || '') || parameters.has(event.parameter))
+      throw new Error('В каталоге нет однозначных параметров CFG. Обновите страницу.');
+    parameters.add(event.parameter);
+    return `${event.parameter} = ${actionUrlFor(event.key)}`;
+  });
+  return '#!version:1.0.0.1\r\n' + lines.join('\r\n') + '\r\n';
+}
+
+function downloadActionUrlConfig() {
+  try {
+    const text = buildActionUrlConfig();
+    const blobUrl = URL.createObjectURL(new Blob([text], {type:'text/plain;charset=utf-8'}));
+    const link = document.createElement('a');
+    const number = $('aurl-number').value === '__auto__' ? 'auto' : $('aurl-number').value;
+    link.href = blobUrl;
+    link.download = `monitoring-sip-${number.replace(/[^a-z0-9_-]/gi, '_')}.cfg`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    actionUrlStatus('CFG скачан. Импортируйте его в настройках телефона и сохраните изменения.');
+  } catch(e) { actionUrlStatus(e.message, true); }
 }
 
 // navigator.clipboard есть только на HTTPS/localhost, панель обычно по HTTP в локалке
@@ -1704,12 +1853,16 @@ function flashCopied(btn, ok) {
   setTimeout(() => { btn.textContent = btn.dataset.label; }, 1500);
 }
 async function copyActionUrl(i, btn) {
-  flashCopied(btn, await copyText(actionUrlFor(actionUrlEvents[i].key)));
+  try { flashCopied(btn, await copyText(actionUrlFor(actionUrlEvents[i].key))); }
+  catch(e) { actionUrlStatus(e.message, true); }
 }
 async function copyAllActionUrls(btn) {
-  const text = actionUrlEvents
-    .map((e, i) => `${i + 1}. ${e.ru} (${e.en})\n${actionUrlFor(e.key)}`).join('\n\n');
-  flashCopied(btn, await copyText(text));
+  try {
+    if (!actionUrlEvents.length) throw new Error('Каталог событий ещё не загружен.');
+    const text = actionUrlEvents
+      .map((e, i) => `${i + 1}. ${e.ru} (${e.en})\n${actionUrlFor(e.key)}`).join('\n\n');
+    flashCopied(btn, await copyText(text));
+  } catch(e) { actionUrlStatus(e.message, true); }
 }
 
 // ── Журнал событий ────────────────────────────────────────────────
@@ -1720,9 +1873,28 @@ function scheduleRecentEvents() {
   recentTimer = setTimeout(loadRecentEvents, 300);
 }
 function resolvedNote(e) {
-  if (!e.number) return '<div class="aurl-en">номер не определён</div>';
+  if (!e.number) return '<div class="aurl-en">Номер не определён. Для телефона с одним SIP-номером выберите его карточку в настройке Action URL выше.</div>';
   const by = {mac: 'по MAC', ip: 'по IP карточки'}[e.resolved_by];
   return by ? `<div class="aurl-en">${by}</div>` : '';
+}
+function remoteNote(e) {
+  let note = '';
+  if (String(e.raw_remote || '').trim().startsWith('$'))
+    note = `Телефон не подставил ${e.raw_remote}`;
+  else if (!e.remote && ['incoming_call', 'outgoing_call'].includes(e.key))
+    note = 'Телефон не передал номер';
+  if (e.remote_source === 'called_number')
+    note += `${note ? '. ' : ''}Показан набранный номер исходящего вызова`;
+  return note ? `<div class="aurl-en">${esc(note)}</div>` : '';
+}
+function eventDiagnostics(e) {
+  const fields = [
+    ['local', e.raw_local], ['remote', e.raw_remote], ['called_number', e.raw_called_number],
+    ['Модель', e.model], ['Прошивка', e.firmware],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== '');
+  if (!fields.length) return '';
+  return `<details class="aurl-details"><summary>Параметры телефона</summary>${fields.map(([name, value]) =>
+    `<div>${esc(name)}: <span class="mono">${esc(value)}</span></div>`).join('')}</details>`;
 }
 async function loadRecentEvents() {
   try {
@@ -1734,7 +1906,7 @@ async function loadRecentEvents() {
         <td class="mono">${esc(e.time)}</td>
         <td>${esc(e.label)}<div class="aurl-en">${esc(e.key ?? '—')}${e.call_id ? ' · call ' + esc(e.call_id) : ''}</div></td>
         <td class="mono">${esc(e.number || '—')}${resolvedNote(e)}</td>
-        <td>${esc(e.remote || '—')}</td>
+        <td>${esc(e.remote || '—')}${remoteNote(e)}${eventDiagnostics(e)}</td>
         <td class="mono">${esc(e.ip || '—')}</td>
         <td>${esc(e.user)}</td>
       </tr>`).join('')

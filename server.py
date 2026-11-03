@@ -35,7 +35,7 @@ socketio = SocketIO(
 
 # Меняется с каждым выпуском: открытые панели сравнивают её с запомненной
 # при первом подключении и предлагают перезагрузить страницу
-VERSION = "Rel 1.1"
+VERSION = "Rel 1.1.1"
 
 PHONES_DIR = Path("users_data")
 AUTH_FILE = Path("auth.json")
@@ -838,6 +838,14 @@ ACTION_URL_EVENTS = [
     ("conference",               "Конференция с",                        "Conference"),
 ]
 EVENT_LABELS = {k: ru for k, ru, _ in ACTION_URL_EVENTS}
+# Verified against the Yealink T53 Remote Control provisioning table:
+# https://support.yealink.com/docs/sip-t53/remote-control/93527fc627104ded93cf7f11a1c2dbe2
+# The last two custom names cannot be inferred from our event keys.
+ACTION_URL_PARAMETERS = {k: f"action_url.{k}" for k, _, _ in ACTION_URL_EVENTS}
+ACTION_URL_PARAMETERS.update({
+    "view_missed_call": "custom.action_url.view_misscall",
+    "view_forwarded_call": "custom.action_url.view_forward",
+})
 
 # Старые значения state — уже прописаны в телефонах, принимаем как синонимы
 LEGACY_STATES = {
@@ -889,15 +897,18 @@ def resolve_number(local: str, mac: str, phone_ip: str, user: str) -> tuple[str,
                 mac_numbers.setdefault((user, mac), set()).add(local)
         return local, "local"
     with lock:
+        ip_numbers = {num for num, phone in users_phones.get(user, {}).items()
+                      if phone_ip and normalize_ip(phone.get("ip")) == phone_ip}
+        # A known shared base stays ambiguous even after just ONE handset has
+        # taught us its MAC. Otherwise all blank events look like that handset.
+        if len(ip_numbers) > 1:
+            return "", ""
         if mac:
             numbers = mac_numbers.get((user, mac), set())
             if len(numbers) == 1:
                 return next(iter(numbers)), "mac"
-        if phone_ip:
-            numbers = {num for num, phone in users_phones.get(user, {}).items()
-                       if phone.get("ip", "").strip() == phone_ip}
-            if len(numbers) == 1:
-                return numbers.pop(), "ip"
+        if len(ip_numbers) == 1:
+            return ip_numbers.pop(), "ip"
     return "", ""
 
 
@@ -938,7 +949,8 @@ def rest_state(number: str) -> str:
 
 
 def record_event(key: str | None, number: str, local: str, resolved_by: str,
-                 remote: str, phone_ip: str, call_id: str, user: str) -> None:
+                 remote: str, phone_ip: str, call_id: str, user: str,
+                 details: dict | None = None) -> None:
     """Последнее событие на карточке + журнал для вкладки «Тесты»."""
     label = EVENT_LABELS.get(key)
     now = time.strftime("%H:%M:%S")
@@ -948,6 +960,7 @@ def record_event(key: str | None, number: str, local: str, resolved_by: str,
             "known": label is not None, "number": number, "local": local,
             "resolved_by": resolved_by, "remote": remote, "ip": phone_ip,
             "call_id": call_id, "user": user,
+            **(details or {}),
         })
         if number and label:
             flags = phone_flags.setdefault(number, {})
@@ -1132,7 +1145,7 @@ def _ev_off_hook(n, remote, ip, user, eid):
         cur = current_state(n)
     if cur == "Входящий_вызов":
         # Трубку сняли, пока звонит, — это ответ (Established может не прийти)
-        _connect(n, "", user, eid)
+        _connect(n, remote, user, eid)
     elif in_call:
         # Если звонок уже идёт (громкая → трубка) — игнорируем OffHook,
         # чтобы не сбить состояние "Разговор" / "Удержание"
@@ -1185,7 +1198,7 @@ def _audio_ev(value):
         if cur == "Входящий_вызов":
             # Ответили кнопкой громкой связи / гарнитуры, не снимая трубку:
             # Established на части телефонов при этом не приходит
-            _connect(n, "", user, eid)
+            _connect(n, remote, user, eid)
         else:
             broadcast_update(event_id=eid)
     return handler
@@ -1355,6 +1368,11 @@ def event():
         return "Unauthorized", 401
 
     state  = request.args.get("state")
+    # Keep the actual macro expansion for diagnostics. Never retain the token
+    # or the full query string in the browser's event journal.
+    raw_local = str(request.args.get("local") or "").strip()[:200]
+    raw_remote = str(request.args.get("remote") or "").strip()[:200]
+    raw_called_number = str(request.args.get("called_number") or "").strip()[:200]
     local  = normalize_number(request.args.get("local"))
     if local.startswith("$"):  # переменная не подставилась
         local = ""
@@ -1369,62 +1387,90 @@ def event():
 
     evt_id = _next_event_id()
     user_phone, resolved_by = resolve_number(local, mac, phone_ip, target_user)
-
-    alog("SIP_RECV",
-         event_id=evt_id,
-         state=state,
-         local=local,
-         number=user_phone,
-         resolved_by=resolved_by,
-         remote=remote,
-         user=target_user,
-         ip=client_ip,
-         phone_ip=phone_ip or None,
-         mac=mac or None,
-         call_id=call_id or None,
-         raw_remote=request.args.get("remote"))
-
-    record_event(key, user_phone, local, resolved_by, remote, phone_ip, call_id, target_user)
-
-    if not user_phone:
-        alog("SIP_NO_LOCAL", "WARNING", event_id=evt_id, state=state, user=target_user)
-        return "OK"
-
-    # Проверяем наличие номера в карточках
-    with lock:
-        phone_registered = (
-            target_user in users_phones and
-            user_phone in users_phones[target_user]
-        )
-    if not phone_registered:
-        alog("SIP_PHONE_NOT_IN_CARDS", "WARNING",
-             event_id=evt_id,
-             number=user_phone,
-             user=target_user,
-             msg="Событие пришло для номера, которого нет в карточках пользователя")
-
-    handler = LEGACY_HANDLERS.get(state) or EVENT_HANDLERS.get(key)
-    if handler is None:
-        alog("SIP_UNKNOWN_STATE", "WARNING",
-             event_id=evt_id, state=state, number=user_phone, user=target_user)
-        return "OK"
-
     with number_lock(user_phone):
+        remote_source = "remote" if remote else ""
+        called_number = clean_remote(request.args.get("called_number"))
+        # $calledNumber is the OUTGOING callee. Only the outgoing event proves
+        # this direction: pending_calls may belong to a different, held line.
+        if not remote and called_number and key == "outgoing_call":
+            remote, remote_source = called_number, "called_number"
+        details = {
+            "raw_local": raw_local, "raw_remote": raw_remote,
+            "raw_called_number": raw_called_number, "remote_source": remote_source,
+            "model": str(request.args.get("model") or "").strip()[:100],
+            "firmware": str(request.args.get("firmware") or "").strip()[:100],
+        }
+
+        alog("SIP_RECV",
+             event_id=evt_id,
+             state=state,
+             local=local,
+             number=user_phone,
+             resolved_by=resolved_by,
+             remote=remote,
+             user=target_user,
+             ip=client_ip,
+             phone_ip=phone_ip or None,
+             mac=mac or None,
+             call_id=call_id or None,
+             **details)
+
+        record_event(key, user_phone, local, resolved_by, remote, phone_ip, call_id,
+                     target_user, details)
+
+        if not user_phone:
+            alog("SIP_NO_LOCAL", "WARNING", event_id=evt_id, state=state, user=target_user)
+            return "OK"
+
+        # Проверяем наличие номера в карточках
+        with lock:
+            phone_registered = (
+                target_user in users_phones and
+                user_phone in users_phones[target_user]
+            )
+        if not phone_registered:
+            alog("SIP_PHONE_NOT_IN_CARDS", "WARNING",
+                 event_id=evt_id,
+                 number=user_phone,
+                 user=target_user,
+                 msg="Событие пришло для номера, которого нет в карточках пользователя")
+
+        handler = LEGACY_HANDLERS.get(state) or EVENT_HANDLERS.get(key)
+        if handler is None:
+            alog("SIP_UNKNOWN_STATE", "WARNING",
+                 event_id=evt_id, state=state, number=user_phone, user=target_user)
+            return "OK"
+
         handler(user_phone, remote, phone_ip, target_user, evt_id)
-    return "OK"
+        return "OK"
 
 
 @app.route("/action_url_events")
 @login_required
 def action_url_events():
     """Каталог событий — панель строит по нему таблицу URL и список тест-событий."""
+    current_user = session.get("username")
+    username = request.args.get("username", current_user)
+    if username != current_user and current_user != "admin":
+        return jsonify({"ok": False, "error": "Доступ запрещен"}), 403
+    if username not in AUTH:
+        return jsonify({"ok": False, "error": "Пользователь не найден"}), 404
+    with lock:
+        phones = [
+            {"number": number, "name": phone.get("name", number),
+             "ip": phone.get("ip", "")}
+            for number, phone in sorted(users_phones.get(username, {}).items(),
+                                        key=lambda item: item[1].get("position", 0))
+        ]
     aliases: dict[str, list[str]] = {}
     for old, new in LEGACY_STATES.items():
         aliases.setdefault(new, []).append(old)
     return jsonify({
         "server_ip": LOCAL_IP,  # если панель открыта как localhost — телефонам нужен LAN-IP
+        "phones": phones,
         "events": [
-            {"key": k, "ru": ru, "en": en, "aliases": aliases.get(k, [])}
+            {"key": k, "ru": ru, "en": en, "aliases": aliases.get(k, []),
+             "parameter": ACTION_URL_PARAMETERS[k]}
             for k, ru, en in ACTION_URL_EVENTS
         ],
     })
