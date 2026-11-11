@@ -14,6 +14,7 @@ def test_inspection_never_probes_an_unmatched_card_or_non_admin(srv, monkeypatch
     monkeypatch.setattr(yealink_setup, "inspect_phone", forbidden_probe)
     payload = {"ip": "10.0.0.11", "username": "admin", "number": "101"}
     assert srv.client.post("/yealink/inspect", json=payload).status_code == 401
+    srv.add_user("bob", [])
     login(srv, "bob")
     assert srv.client.post("/yealink/inspect", json=payload).status_code == 403
     login(srv)

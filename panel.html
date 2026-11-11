@@ -3,10 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
-<title>SIP Monitor by Стёпчик SVL 1.2</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="/static/monitor.svg">
+<title>Иней by Стёпчик</title>
+
 <script src="/static/socket.io.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -776,6 +775,7 @@ tbody td:first-child { color: var(--text); }
 .aurl-status { font-size:12px;color:var(--text-dim);line-height:1.5; }
 .aurl-status.error { color:#fca5a5; }
 .aurl-inspect[hidden] { display:none; }
+#federation-link[hidden], #node-update[hidden] { display:none; }
 .aurl-auto-note { font-size:12px;color:var(--orange);line-height:1.5; }
 .aurl-details { margin-top:5px;font-size:11px;color:var(--text-dim);word-break:break-word; }
 .aurl-details summary { cursor:pointer; }
@@ -801,6 +801,79 @@ tbody td:first-child { color: var(--text); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(80,130,255,.2); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(80,130,255,.4); }
+
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid #9dc3ff; outline-offset: 2px; }
+button:disabled { opacity: .55; cursor: default; }
+.logo-icon { object-fit: contain; background: none; border: 0; }
+.author-link {
+  background: none; border: 0; padding: 0; cursor: pointer; color: #93c5fd;
+}
+.author-link:hover { text-decoration: underline; }
+.conn-dot.polling { background: var(--gray); animation: none; }
+#monitor-notice:not(:empty), .form-status:not([hidden]) {
+  color: #fcd998; font-size: 13px; margin-bottom: 12px;
+}
+button.section-head {
+  width: 100%; border: 0; border-bottom: 1px solid var(--border);
+  background: transparent; text-align: left; color: var(--text); font: inherit;
+}
+button.section-head:hover { background: rgba(255,255,255,.02); }
+.section.collapsed .section-empty { display: none; }
+.section-body {
+  --card-min-width: 270px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--card-min-width)), 1fr));
+}
+.card {
+  min-width: 0; grid-column: span var(--card-columns, 1);
+  min-height: var(--card-height, 0px);
+}
+.card.is-arranging { z-index: 1; user-select: none; }
+.card.drop-target { outline: 2px solid #60a5fa; outline-offset: -2px; }
+.card-move, .card-size {
+  position: absolute; left: 5px; bottom: 1px; width: 26px; height: 17px; border: 0;
+  display: grid; place-items: center; color: #a9c4f7; background: none;
+  opacity: 0; touch-action: none; cursor: grab;
+}
+.card-size { left: auto; right: 1px; width: 18px; cursor: nwse-resize; }
+.card-move { left: 50%; transform: translateX(-50%); }
+.card:hover :is(.card-move, .card-size), .card:focus-within :is(.card-move, .card-size),
+.card.is-arranging :is(.card-move, .card-size) { opacity: 1; }
+.card-move svg, .card-size svg { width: 14px; height: 14px; pointer-events: none; }
+@media (pointer: coarse) {
+  .card-inner { padding-bottom: 39px; }
+  .card-move, .card-size { opacity: 1; width: 44px; height: 34px; }
+}
+dialog.modal {
+  position: fixed; inset: 0; margin: auto; padding: 0; max-height: calc(100% - 24px);
+  max-width: calc(100% - 24px); overflow: auto; color: var(--text); background: #0f1b32;
+}
+dialog::backdrop { background: #030810bf; }
+.modal-body label { display: grid; gap: 5px; font-size: 13px; color: var(--text-dim); }
+.modal-body a { color: #9dc3ff; }
+.test-fields {
+  padding: 16px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 10px; align-items: end;
+}
+.nav { max-width: 100%; overflow-x: auto; }
+.nav-btn { flex-shrink: 0; }
+@media (max-width: 900px) {
+  .header, .header-right { flex-wrap: wrap; }
+}
+@media (max-width: 640px) {
+  .header, .nav { position: static; }
+  .header-logo, .header-right { flex-shrink: 1; }
+  .header-right { justify-content: flex-end; }
+  .nav-user { display: none; }
+  .add-bar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .add-bar-title { grid-column: 1 / -1; }
+  .add-bar .inp { width: 100%; min-width: 0; }
+  .section-body { grid-template-columns: minmax(0, 1fr); }
+  .test-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 </style>
 </head>
 <body>
@@ -818,58 +891,50 @@ tbody td:first-child { color: var(--text); }
   <!-- HEADER -->
   <header class="header">
     <div class="header-logo">
-      <div class="logo-icon">
-        <svg viewBox="0 0 18 18" fill="none">
-          <circle cx="9" cy="9" r="3.5" stroke="#60a5fa" stroke-width="1.2"/>
-          <circle cx="9" cy="9" r="6.5" stroke="#3b82f6" stroke-width=".8" stroke-dasharray="2 2" opacity=".5"/>
-          <circle cx="9" cy="9" r="1.2" fill="#93c5fd"/>
-          <line x1="9" y1="2" x2="9" y2="4" stroke="#60a5fa" stroke-width="1" stroke-linecap="round"/>
-          <line x1="9" y1="14" x2="9" y2="16" stroke="#60a5fa" stroke-width="1" stroke-linecap="round"/>
-          <line x1="2" y1="9" x2="4" y2="9" stroke="#60a5fa" stroke-width="1" stroke-linecap="round"/>
-          <line x1="14" y1="9" x2="16" y2="9" stroke="#60a5fa" stroke-width="1" stroke-linecap="round"/>
-        </svg>
-      </div>
+      <img class="logo-icon" src="/static/monitor.svg" width="36" height="36" alt="">
       <div>
-        <div class="logo-name">SIP Monitor</div>
-        <div class="logo-ver">Rel 1.2</div>
+        <div class="logo-name" id="site-name">Иней</div>
+        <button class="logo-ver author-link" type="button" onclick="$('about').showModal()" title="О программе">by Стёпчик</button>
       </div>
     </div>
 
     <div class="header-stats">
       <div class="hstat">
         <div class="hstat-dot orange"></div>
-        <span class="hstat-val" id="h-active">0</span>
+        <span class="hstat-val" id="h-active">—</span>
         <span class="hstat-lbl">Активные</span>
       </div>
       <div class="hstat">
         <div class="hstat-dot green"></div>
-        <span class="hstat-val" id="h-idle">0</span>
+        <span class="hstat-val" id="h-idle">—</span>
         <span class="hstat-lbl">В покое</span>
       </div>
       <div class="hstat">
         <div class="hstat-dot gray"></div>
-        <span class="hstat-val" id="h-offline">0</span>
-        <span class="hstat-lbl">Offline</span>
+        <span class="hstat-val" id="h-offline">—</span>
+        <span class="hstat-lbl">Требуют внимания</span>
       </div>
       <div class="hstat">
         <div class="hstat-dot blue"></div>
-        <span class="hstat-val" id="h-total">0</span>
+        <span class="hstat-val" id="h-total">—</span>
         <span class="hstat-lbl">Всего</span>
       </div>
     </div>
 
     <div class="header-right">
-      <div class="conn-badge">
+      <div class="conn-badge" role="status">
         <div class="conn-dot" id="conn-dot"></div>
-        <span id="conn-text">Соединение...</span>
+        <span id="conn-text">Подключение…</span>
       </div>
+      <a class="btn btn-ghost btn-sm" id="federation-link" href="/federation" hidden>Подключение узла</a>
+      <button class="btn btn-primary btn-sm" id="node-update" type="button" onclick="requestNodeUpdate()" hidden>Обновить</button>
       <button class="btn btn-ghost btn-sm" onclick="logout()">Выйти</button>
     </div>
   </header>
 
   <!-- NAV -->
-  <nav class="nav">
-    <button class="nav-btn active" onclick="switchTab('monitoring')" id="tab-btn-monitoring">
+  <nav class="nav" aria-label="Разделы">
+    <button class="nav-btn active" onclick="switchTab('monitoring')" id="tab-btn-monitoring" aria-current="page">
       <svg viewBox="0 0 15 15" fill="none"><rect x="1" y="1" width="5.5" height="5.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/><rect x="8.5" y="1" width="5.5" height="5.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/><rect x="1" y="8.5" width="5.5" height="5.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/><rect x="8.5" y="8.5" width="5.5" height="5.5" rx="1.2" stroke="currentColor" stroke-width="1.2"/></svg>
       Мониторинг
       <span class="nav-count" id="nav-cnt">0</span>
@@ -884,11 +949,11 @@ tbody td:first-child { color: var(--text); }
     </button>
     <button class="nav-btn" onclick="switchTab('accounts')" id="tab-btn-accounts" style="display:none">
       <svg viewBox="0 0 15 15" fill="none"><circle cx="7.5" cy="5" r="2.5" stroke="currentColor" stroke-width="1.2"/><path d="M2 13c0-3.03 2.46-5.5 5.5-5.5S13 9.97 13 13" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-      Аккаунты
+      Пользователи
     </button>
     <button class="nav-btn" onclick="switchTab('tests')" id="tab-btn-tests" style="display:none">
       <svg viewBox="0 0 15 15" fill="none"><path d="M5 1v5L2 13h11L10 6V1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 1h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-      Тесты
+      Диагностика
     </button>
     <div class="nav-sep"></div>
     <span class="nav-user" id="nav-user"></span>
@@ -899,18 +964,19 @@ tbody td:first-child { color: var(--text); }
 
     <!-- ── MONITORING ── -->
     <div class="tab-pane active" id="pane-monitoring">
-      <div class="add-bar">
+      <form class="add-bar" onsubmit="addPhone(event)">
         <span class="add-bar-title">Добавить:</span>
-        <input class="inp" id="new-number" placeholder="Номер">
-        <input class="inp" id="new-name" placeholder="Название / кабинет">
-        <input class="inp" id="new-ip" placeholder="IP адрес">
-        <button class="btn btn-primary" onclick="addPhone()">
+        <input class="inp" id="new-number" placeholder="Номер" aria-label="Номер" required>
+        <input class="inp" id="new-name" placeholder="Название / кабинет" aria-label="Название / кабинет">
+        <input class="inp" id="new-ip" placeholder="IP адрес" aria-label="IP адрес">
+        <button class="btn btn-primary" type="submit">
           <svg viewBox="0 0 14 14" fill="none"><path d="M7 1v12M1 7h12" stroke="white" stroke-width="1.6" stroke-linecap="round"/></svg>
           Добавить
         </button>
-      </div>
-
-      <div id="sections-wrap"></div>
+      </form>
+      <div id="monitor-notice" role="status"></div>
+      <div id="card-status" class="form-status" role="status" hidden></div>
+      <div id="sections-wrap"><div class="section-empty">Загрузка телефонов…</div></div>
     </div>
 
     <!-- ── LIBRARY ── -->
@@ -921,9 +987,9 @@ tbody td:first-child { color: var(--text); }
       </div>
       <div class="shared-banner">
         <div class="shared-banner-text">
-          Сделай набор общим — другие пользователи смогут импортировать твои карточки одним кликом.
+          Доступ к моему набору
         </div>
-        <button class="btn btn-ghost btn-sm" id="shared-toggle-btn" onclick="toggleShared()">Загрузка...</button>
+        <button class="btn btn-ghost btn-sm" id="shared-toggle-btn" onclick="toggleShared()" disabled>Загрузка…</button>
       </div>
       <div id="library-body">
         <div style="color:var(--text-muted);font-size:13px">Загрузка...</div>
@@ -934,15 +1000,15 @@ tbody td:first-child { color: var(--text); }
     <div class="tab-pane" id="pane-history">
       <div class="pane-header">
         <div class="pane-title">История звонков</div>
-        <button class="btn btn-ghost btn-sm" onclick="loadHistory()">Обновить</button>
+        <button class="btn btn-ghost btn-sm" onclick="loadHistory(true)">Обновить</button>
       </div>
       <div class="filters">
-        <select class="filter-sel" id="hist-number" onchange="loadHistory()">
+        <select class="filter-sel" id="hist-number" aria-label="Номер абонента" onchange="loadHistory()">
           <option value="">Все номера</option>
         </select>
-        <input type="date" class="filter-date" id="hist-date" onchange="loadHistory()">
+        <input type="date" class="filter-date" id="hist-date" aria-label="Дата звонка" onchange="loadHistory()">
         <div id="hist-user-wrap" style="display:none">
-          <select class="filter-sel" id="hist-user" onchange="loadHistory()">
+          <select class="filter-sel" id="hist-user" aria-label="Пользователь" onchange="loadHistory()">
             <option value="">Все пользователи</option>
           </select>
         </div>
@@ -960,20 +1026,20 @@ tbody td:first-child { color: var(--text); }
             </tr>
           </thead>
           <tbody id="hist-body">
-            <tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">Загрузка...</td></tr>
+            <tr><td colspan="5" style="text-align:center;padding:30px;color:var(--text-muted)">Загрузка…</td></tr>
           </tbody>
         </table>
       </div>
       <div class="pagination">
-        <button class="btn btn-ghost btn-sm" onclick="histPage(-1)" id="hist-prev">← Назад</button>
-        <div class="pagination-info" id="hist-page-info">—</div>
-        <button class="btn btn-ghost btn-sm" onclick="histPage(1)" id="hist-next">Вперёд →</button>
+        <button class="btn btn-ghost btn-sm" onclick="histPage(-1)" id="hist-prev" disabled>← Назад</button>
+        <div class="pagination-info" id="hist-page-info" role="status"></div>
+        <button class="btn btn-ghost btn-sm" onclick="histPage(1)" id="hist-next" disabled>Вперёд →</button>
       </div>
     </div>
 
     <!-- ── ACCOUNTS ── -->
     <div class="tab-pane" id="pane-accounts">
-      <div class="pane-header"><div class="pane-title">Аккаунты</div></div>
+      <div class="pane-header"><div class="pane-title">Пользователи</div></div>
       <div class="section" style="margin-bottom:16px">
         <div class="section-head" style="cursor:default">
           <span class="section-title">Регистрация пользователя</span>
@@ -993,7 +1059,7 @@ tbody td:first-child { color: var(--text); }
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Логин</th><th>Создан</th><th>Event Token</th></tr></thead>
+          <thead><tr><th>Логин</th><th>Создан</th><th>Ключ событий</th></tr></thead>
           <tbody id="users-list"></tbody>
         </table>
       </div>
@@ -1001,21 +1067,25 @@ tbody td:first-child { color: var(--text); }
 
     <!-- ── TESTS ── -->
     <div class="tab-pane" id="pane-tests">
-      <div class="pane-header"><div class="pane-title">Тест событий</div></div>
+      <div class="pane-header">
+        <div class="pane-title">Тест событий</div>
+        <a class="btn btn-ghost btn-sm" id="virtual-phone-lab" href="http://127.0.0.1:18080/lab"
+           target="_blank" rel="noopener">Виртуальные телефоны</a>
+      </div>
       <div class="section">
         <div class="section-head" style="cursor:default"><span class="section-title">Отправить тестовое событие</span></div>
-        <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end">
+        <div class="test-fields">
           <div>
-            <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">IP сервера</div>
-            <input id="test-ip" class="modal-inp" placeholder="127.0.0.1">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Адрес сервера</div>
+            <input id="test-ip" aria-label="Адрес сервера" class="modal-inp" placeholder="http://127.0.0.1:8000">
           </div>
           <div>
             <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Событие</div>
-            <select id="test-state" class="filter-sel" style="width:100%"></select>
+            <select id="test-state" aria-label="Событие" class="filter-sel" style="width:100%"></select>
           </div>
           <div>
-            <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Номер (local)</div>
-            <input id="test-local" class="modal-inp" placeholder="номер телефона">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Номер</div>
+            <input id="test-local" aria-label="Номер" class="modal-inp" placeholder="номер телефона">
           </div>
           <button class="btn btn-primary" onclick="sendTestEvent()">Отправить</button>
         </div>
@@ -1104,40 +1174,54 @@ tbody td:first-child { color: var(--text); }
   <button class="btn btn-primary btn-sm" onclick="location.reload()">Обновить</button>
 </div>
 
-<!-- EDIT MODAL -->
-<div class="backdrop" id="edit-backdrop" onclick="closeEditModal(event)">
-  <div class="modal">
+<dialog class="modal" id="edit-backdrop" aria-labelledby="edit-title">
+  <form onsubmit="saveEdit(event)">
     <div class="modal-head">
-      <div class="modal-title">Редактировать карточку</div>
-      <button class="btn btn-ghost btn-sm" onclick="closeEditModal()">✕</button>
+      <div class="modal-title" id="edit-title">Редактировать карточку</div>
+      <button class="btn btn-ghost btn-sm" type="button" onclick="closeEditModal()" aria-label="Закрыть">✕</button>
     </div>
     <div class="modal-body">
-      <input class="modal-inp" id="edit-number" placeholder="Номер">
+      <label>Номер<input class="modal-inp" id="edit-number" required autofocus></label>
       <input type="hidden" id="edit-original-number">
-      <input class="modal-inp" id="edit-name" placeholder="Название / кабинет">
-      <input class="modal-inp" id="edit-ip" placeholder="IP адрес">
+      <label>Название / кабинет<input class="modal-inp" id="edit-name"></label>
+      <label>IP-адрес<input class="modal-inp" id="edit-ip"></label>
+      <div id="edit-status" class="form-status" role="status" hidden></div>
     </div>
     <div class="modal-foot">
-      <button class="btn btn-ghost" onclick="closeEditModal()">Отмена</button>
-      <button class="btn btn-primary" onclick="saveEdit()">Сохранить</button>
+      <button class="btn btn-ghost" type="button" onclick="closeEditModal()">Отмена</button>
+      <button class="btn btn-primary" type="submit">Сохранить</button>
     </div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="about" aria-labelledby="about-title">
+  <div class="modal-head"><div class="modal-title" id="about-title">Иней</div></div>
+  <div class="modal-body">
+    <span>Автор и поддержка · Стёпчик</span>
+    <a href="https://github.com/Rayanara13/Monitoring-SIP" target="_blank" rel="noopener">Репозиторий проекта</a>
   </div>
-</div>
+  <form method="dialog" class="modal-foot"><button class="btn btn-ghost">Закрыть</button></form>
+</dialog>
 
 <script>
 'use strict';
 
 // ── State ──────────────────────────────────────────────────────
-let dragNumber = null;
 let socket = null;
 let currentUserInfo = null;
-let historyPage = 1;
-const historyPageSize = 25;
-let historyData = [];
 
-// card sizes from localStorage
-let cardSizes = {};
-try { const s = localStorage.getItem('__cardSizes'); if (s) cardSizes = JSON.parse(s); } catch(e){}
+let phonesSnapshot = null;
+let updatedAt = null;
+let snapshotStale = false;
+const cards = new Map();
+const phoneGroups = {
+  active: {title: 'Активные', icon: '🔴'},
+  idle: {title: 'В покое', icon: '🟢'},
+  offline: {title: 'Требуют внимания', icon: '⚫'},
+};
+let cardGesture = null;
+let movingCard = false;
+const resizingCards = new Map();
 
 // ── Helpers ─────────────────────────────────────────────────────
 const esc = v => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -1164,7 +1248,8 @@ function pillClass(state) {
   return 'pill-active';
 }
 function prettyState(state) {
-  return (state || '').replaceAll('_', ' ');
+  const labels = {OFFLINE: 'Нет связи', DND: 'Не беспокоить'};
+  return labels[state] || (state || 'Нет данных').replaceAll('_', ' ');
 }
 function pingClass(ping) {
   if (!ping || ping === '?') return 'ping-unknown';
@@ -1173,7 +1258,6 @@ function pingClass(ping) {
 }
 function isActive(s) { return s && s !== 'В_покое' && !OFFLINE_STATES.includes(s); }
 function isIdle(s)   { return s === 'В_покое'; }
-function isOffline(s){ return OFFLINE_STATES.includes(s); }
 
 // Значки функций телефона (приходят из Action URL)
 function flagsHtml(p) {
@@ -1183,7 +1267,7 @@ function flagsHtml(p) {
     out.push(`<span class="flag ${cls}" title="${esc(title)}">${esc(text)}</span>`);
 
   if (f.lines > 1) add(`📞 Линий: ${f.lines}`, '', 'Звонок на второй линии (вызов поверх разговора)');
-  if (f.dnd && p.state !== 'DND') add('🔕 DND', 'flag-warn', 'Не беспокоить включено');
+  if (f.dnd && p.state !== 'DND') add('Не беспокоить', 'flag-warn');
   const fwd = [f.fwd_always && 'всегда', f.fwd_busy && 'занято', f.fwd_noanswer && 'нет ответа'].filter(Boolean);
   if (fwd.length) add(`↪ ${fwd.join(', ')}`, '', 'Переадресация включена');
   if (f.mute) add('🔇 Микрофон выкл', 'flag-warn');
@@ -1206,16 +1290,22 @@ function lastEventTitle(p) {
 
 // ── Socket ──────────────────────────────────────────────────────
 function initSocket() {
-  if (typeof io === 'undefined') { startPolling(); return; }
+  if (typeof io === 'undefined') return;
   socket = io();
-  socket.on('connect', () => {
-    setConn('online');
-    stopPolling();
+  socket.on('connect', refreshLiveViews);
+  socket.on('disconnect', refreshLiveViews);
+  socket.on('connect_error', updateConnection);
+  socket.on('phones_update', data => {
     refreshPhones();
+    if (data?.event_id != null) refreshOpenLogs();
   });
-  socket.on('disconnect', () => { setConn('offline'); startPolling(); });
-  socket.on('connect_error', () => { setConn('error'); startPolling(); });
-  socket.on('phones_update', () => { refreshPhones(); scheduleRecentEvents(); });
+  socket.on('recent_events_update', refreshOpenLogs);
+  socket.on('shared_sets_update', () => {
+    if ($('pane-library').classList.contains('active')) {
+      loadLibrary();
+      loadSharedStatus();
+    }
+  });
   socket.on('server_version', onServerVersion);
 }
 
@@ -1232,20 +1322,30 @@ function onServerVersion(d) {
   }
 }
 
-function setConn(state) {
-  const dot = $('conn-dot'), txt = $('conn-text');
+function updateConnection() {
+  const dot = $('conn-dot');
+  const label = $('conn-text');
+  const notice = $('monitor-notice');
   dot.className = 'conn-dot';
-  if (state === 'online')  { txt.textContent = 'Онлайн'; }
-  if (state === 'offline') { dot.classList.add('offline'); txt.textContent = 'Отключено'; }
-  if (state === 'error')   { dot.classList.add('error'); txt.textContent = 'Ошибка'; }
+  if (snapshotStale) {
+    dot.classList.add('offline');
+    label.textContent = 'Нет связи';
+    notice.textContent = updatedAt
+      ? 'Последние данные в ' + updatedAt.toLocaleTimeString('ru-RU')
+      : 'Не удалось загрузить телефоны';
+  } else if (updatedAt) {
+    const live = Boolean(socket?.connected);
+    dot.classList.toggle('polling', !live);
+    label.textContent = live ? 'На связи' : 'Периодический опрос';
+    notice.textContent = '';
+  } else {
+    dot.classList.add('polling');
+    label.textContent = 'Подключение…';
+  }
 }
 
-let pollingTimer = null;
-function startPolling() { if (!pollingTimer) pollingTimer = setInterval(refreshPhones, 5000); }
-function stopPolling()  { if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; } }
-
 // ── Duration ticker ───────────────────────────────────────────────
-const _callStarts = {};  // number → unix timestamp (seconds)
+const _callStarts = Object.create(null);  // number → unix timestamp (seconds)
 
 function _fmtDur(sec) {
   const h = Math.floor(sec / 3600);
@@ -1256,113 +1356,204 @@ function _fmtDur(sec) {
   return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
+function tickCardDuration(number, now) {
+  const start = _callStarts[number];
+  if (snapshotStale || start == null) return;
+  const elapsed = _fmtDur(Math.max(0, Math.floor((now - start) / 1000)));
+  const el = cards.get(number)?.content.querySelector('.duration');
+  if (el) el.textContent = elapsed;
+}
+
 setInterval(() => {
+  if (snapshotStale) return;
   const now = Date.now();
-  for (const [num, ts] of Object.entries(_callStarts)) {
-    const el = document.querySelector(`.card[data-number="${CSS.escape(num)}"] .duration`);
-    if (el) el.textContent = _fmtDur(Math.max(0, Math.floor((now - ts) / 1000)));
-  }
+  for (const number of Object.keys(_callStarts)) tickCardDuration(number, now);
 }, 1000);
 
 // ── Data refresh ─────────────────────────────────────────────────
-let refreshing = false;
-let refreshPending = false;  // событие пришло во время fetch — перечитать после
-async function refreshPhones() {
-  if (refreshing) { refreshPending = true; return; }
-  refreshing = true;
+let phonesRequest = null;
+let queuedPhonesRequest = null;
+
+function refreshPhones() {
+  if (!phonesRequest) {
+    phonesRequest = loadPhonesSnapshot().finally(() => { phonesRequest = null; });
+    return phonesRequest;
+  }
+  if (!queuedPhonesRequest) {
+    queuedPhonesRequest = phonesRequest.then(() => {
+      queuedPhonesRequest = null;
+      return refreshPhones();
+    });
+  }
+  return queuedPhonesRequest;
+}
+
+function refreshLiveViews() {
+  refreshPhones();
+  refreshOpenLogs();
+}
+
+async function loadPhonesSnapshot() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
   try {
-    const res = await fetch('/phones');
+    const res = await fetch('/phones', {signal: controller.signal, cache: 'no-store'});
     if (res.status === 401) { location.href = '/login'; return; }
+    if (!res.ok) throw new Error('Не удалось загрузить телефоны');
     const json = await res.json();
-    const phones = Array.isArray(json) ? json : (json.phones ?? []);
-    renderMonitoring(phones);
-  } catch(e) {}
-  finally {
-    refreshing = false;
-    if (refreshPending) { refreshPending = false; refreshPhones(); }
+    const phones = Array.isArray(json) ? json : json.phones;
+    if (!Array.isArray(phones)) throw new Error('Не удалось загрузить телефоны');
+    phonesSnapshot = phones;
+    updatedAt = new Date();
+    snapshotStale = false;
+    const activeNums = new Set();
+    for (const phone of phones) {
+      if (phone.duration_sec == null) continue;
+      _callStarts[phone.number] = updatedAt.getTime() - phone.duration_sec * 1000;
+      activeNums.add(phone.number);
+    }
+    for (const number of Object.keys(_callStarts)) {
+      if (!activeNums.has(number)) delete _callStarts[number];
+    }
+    syncHistoryNumbers(phones);
+    updateMonitoring();
+    for (const number of activeNums) tickCardDuration(number, updatedAt.getTime());
+  } catch (error) {
+    snapshotStale = true;
+    if (!phonesSnapshot) updateMonitoring();
+  } finally {
+    clearTimeout(timeout);
+    updateConnection();
   }
 }
 
-function renderMonitoring(phones) {
-  // обновляем карту для тикера: храним клиентский timestamp начала
-  // чтобы не зависеть от расхождения часов сервера и браузера
-  const activeNums = new Set();
-  const clientNow = Date.now();
-  phones.forEach(p => {
-    if (p.duration_sec != null) {
-      _callStarts[p.number] = clientNow - p.duration_sec * 1000;
-      activeNums.add(p.number);
-    }
-  });
-  Object.keys(_callStarts).forEach(n => { if (!activeNums.has(n)) delete _callStarts[n]; });
-
-  // stats
-  let active = 0, idle = 0, offline = 0;
-  phones.forEach(p => {
-    if (isActive(p.state)) active++;
-    else if (isIdle(p.state)) idle++;
-    else offline++;
-  });
-  $('h-active').textContent = active;
-  $('h-idle').textContent = idle;
-  $('h-offline').textContent = offline;
-  $('h-total').textContent = phones.length;
-  $('nav-cnt').textContent = phones.length;
-
-  const groups = { active: [], idle: [], offline: [] };
-  phones.forEach(p => {
-    if (isActive(p.state)) groups.active.push(p);
-    else if (isIdle(p.state)) groups.idle.push(p);
-    else groups.offline.push(p);
-  });
-
-  const wrap = $('sections-wrap');
-  const defs = [
-    { key:'active', icon:'🔴', title:'Активные', items: groups.active },
-    { key:'idle',   icon:'🟢', title:'В покое',  items: groups.idle },
-    { key:'offline',icon:'⚫', title:'Offline',   items: groups.offline },
-  ];
-
-  // preserve collapse state
-  const collapsed = {};
-  wrap.querySelectorAll('.section').forEach(s => {
-    collapsed[s.dataset.key] = s.classList.contains('collapsed');
-  });
-
-  wrap.innerHTML = defs.map(d => {
-    const isCollapsed = collapsed[d.key] ?? false;
-    const bodyHtml = d.items.length === 0
-      ? `<div class="section-empty">Нет абонентов</div>`
-      : `<div class="section-body">${d.items.map(p => cardHtml(p)).join('')}</div>`;
-    return `
-      <div class="section ${isCollapsed?'collapsed':''}" data-key="${d.key}">
-        <div class="section-head" onclick="toggleSection(this.parentElement)">
-          <span class="section-icon">${d.icon}</span>
-          <span class="section-title">${d.title}</span>
-          <span class="section-cnt">${d.items.length}</span>
-          <span class="section-toggle">▾</span>
-        </div>
-        ${bodyHtml}
-      </div>`;
-  }).join('');
-
-  // bind drag events
-  wrap.querySelectorAll('.card').forEach(bindCard);
+function groupFor(state) {
+  if (isActive(state)) return 'active';
+  if (isIdle(state)) return 'idle';
+  return 'offline';
 }
 
-function toggleSection(el) {
-  el.classList.toggle('collapsed');
+function buildMonitoring() {
+  $('sections-wrap').innerHTML = Object.entries(phoneGroups).map(([key, group]) => `
+    <section class="section" data-key="${key}">
+      <button type="button" class="section-head" onclick="toggleSection(this)"
+              aria-controls="group-${key}" aria-expanded="true">
+        <span class="section-icon" aria-hidden="true">${group.icon}</span>
+        <span class="section-title">${group.title}</span>
+        <span class="section-cnt">0</span>
+        <span class="section-toggle" aria-hidden="true">▾</span>
+      </button>
+      <div class="section-empty" hidden>Нет абонентов</div>
+      <div class="section-body" id="group-${key}" hidden></div>
+    </section>`).join('');
+}
+
+function updateMonitoring() {
+  if (!phonesSnapshot) {
+    if (snapshotStale) $('sections-wrap').textContent = '';
+    return;
+  }
+  if (!$('group-active')) buildMonitoring();
+
+  const focused = document.activeElement;
+  const focusedCard = focused?.closest('.card');
+  const focusedAction = focused?.dataset.action;
+  const numbers = new Set(phonesSnapshot.map(p => p.number));
+  for (const [number, card] of cards) {
+    if (numbers.has(number)) continue;
+    if (cardGesture?.card === card.node) endCardGesture();
+    card.node.remove();
+    cards.delete(number);
+  }
+
+  const groups = {active: [], idle: [], offline: []};
+  for (const phone of phonesSnapshot) {
+    let card = cards.get(phone.number);
+    if (!card) {
+      card = createCard(phone.number);
+      cards.set(phone.number, card);
+    }
+    updateCard(card, phone);
+    const key = cardGesture?.card === card.node
+      ? card.node.closest('.section').dataset.key
+      : groupFor(phone.state);
+    groups[key].push(card);
+  }
+
+  for (const [key, group] of Object.entries(groups)) {
+    const grid = $('group-' + key);
+    const section = grid.parentElement;
+    section.querySelector('.section-cnt').textContent = group.length;
+    section.querySelector('.section-empty').hidden = group.length > 0;
+    grid.hidden = group.length === 0;
+    let next = grid.firstElementChild;
+    for (const {node} of group) {
+      if (node === next) next = next.nextElementSibling;
+      else if (cardGesture?.card !== node) grid.insertBefore(node, next);
+    }
+    $('h-' + key).textContent = group.length;
+  }
+  $('h-total').textContent = phonesSnapshot.length;
+  $('nav-cnt').textContent = phonesSnapshot.length;
+  updateCardSizes();
+  if (focusedAction && focusedCard?.isConnected && document.activeElement === document.body) {
+    focusedCard.querySelector(`[data-action="${focusedAction}"]`)?.focus({preventScroll: true});
+  }
+}
+
+function toggleSection(button) {
+  const collapsed = button.parentElement.classList.toggle('collapsed');
+  button.setAttribute('aria-expanded', String(!collapsed));
+  if (!collapsed) updateCardSizes();
+}
+
+function createCard(number) {
+  const node = document.createElement('div');
+  node.className = 'card';
+  node.dataset.number = number;
+  node.innerHTML = `
+    <div class="card-inner"></div>
+    <button type="button" class="card-move" data-action="move"
+            title="Переместить (стрелки)" aria-label="Переместить карточку стрелками">
+      <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
+        <circle cx="6" cy="4" r="1"/><circle cx="10" cy="4" r="1"/>
+        <circle cx="6" cy="8" r="1"/><circle cx="10" cy="8" r="1"/>
+        <circle cx="6" cy="12" r="1"/><circle cx="10" cy="12" r="1"/>
+      </svg>
+    </button>
+    <button type="button" class="card-size" data-action="resize"
+            title="Изменить размер (стрелки), сбросить (Home)" aria-label="Изменить размер карточки стрелками">
+      <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-linecap="round">
+        <path d="M3 13 13 3M7 13l6-6m-2 6 2-2"/>
+      </svg>
+    </button>`;
+  bindCard(node);
+  return {node, content: node.firstElementChild, markup: '', phone: null};
+}
+
+function updateCard(card, phone) {
+  if (card.phone?.state !== phone.state) {
+    for (const cls of ['state-idle', 'state-offline', 'state-talk', 'state-active']) {
+      card.node.classList.toggle(cls, cls === stateClass(phone.state));
+    }
+  }
+  card.phone = phone;
+  const markup = cardHtml(phone);
+  if (card.markup === markup) return;
+  const focused = document.activeElement;
+  const action = card.content.contains(focused) ? focused.dataset.action : '';
+  card.markup = markup;
+  card.content.innerHTML = markup;
+  if (action) card.content.querySelector(`[data-action="${action}"]`)?.focus({preventScroll: true});
+  tickCardDuration(phone.number, Date.now());
 }
 
 function cardHtml(p) {
-  const sc = stateClass(p.state);
   const pc = pillClass(p.state);
   const pgc = pingClass(p.ping);
   const hasPeer = p.peer && p.peer !== '-' && p.peer !== 'Не определен';
 
   return `
-<div class="card ${sc}" data-number="${esc(p.number)}" draggable="true">
-  <div class="card-inner">
     <div class="card-top">
       <div class="card-info">
         <div class="card-name">${esc(p.name)}</div>
@@ -1378,79 +1569,254 @@ function cardHtml(p) {
       </div>
       <div class="call-block">
         <div class="call-label">Длительность</div>
-        <div class="call-val duration">${esc(p.duration || '00:00')}</div>
+        <div class="call-val duration">00:00</div>
       </div>
     </div>
     <div class="card-bottom">
       <span class="card-ping ${pgc}">${esc(p.ping || '?')}</span>
       <span class="card-time">${esc(p.time && p.time !== '-' ? p.time : '')}</span>
       <div class="card-acts">
-        <button class="btn btn-ghost btn-xs" onclick="openEdit(${jsArg(p.number)},${jsArg(p.name)},${jsArg(p.ip)})">✎</button>
-        <button class="btn btn-danger btn-xs" onclick="deletePhone(${jsArg(p.number)})">✕</button>
+        <button class="btn btn-ghost btn-xs" data-action="edit" title="Редактировать" aria-label="Редактировать карточку" onclick="openEdit(${jsArg(p.number)},${jsArg(p.name)},${jsArg(p.ip)})">✎</button>
+        <button class="btn btn-danger btn-xs" data-action="delete" title="Удалить" aria-label="Удалить карточку" onclick="deletePhone(${jsArg(p.number)})">✕</button>
       </div>
-    </div>
-  </div>
-</div>`;
+    </div>`;
 }
 
-// ── Drag & Drop ──────────────────────────────────────────────────
+// ── Перемещение и размер карточек ────────────────────────────────
+function gridMetrics(grid) {
+  const css = getComputedStyle(grid);
+  const width = grid.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+  const gap = parseFloat(css.columnGap);
+  const minWidth = parseFloat(css.getPropertyValue('--card-min-width'));
+  const columns = matchMedia('(max-width: 640px)').matches
+    ? 1 : Math.max(1, Math.floor((width + gap) / (minWidth + gap)));
+  return {columns, step: Math.max(1, (width + gap) / columns)};
+}
+
+function applyCardSize(node, phone, maxColumns) {
+  node.style.setProperty('--card-columns', Math.min(phone.columns ?? 1, maxColumns));
+  node.style.setProperty('--card-height', `${phone.min_height ?? 0}px`);
+}
+
+function updateCardSizes() {
+  for (const key of Object.keys(phoneGroups)) {
+    const grid = $('group-' + key);
+    if (!grid?.clientWidth) continue;
+    const {columns} = gridMetrics(grid);
+    for (const node of grid.children) {
+      if (cardGesture?.card === node && cardGesture.kind === 'resize') continue;
+      const number = node.dataset.number;
+      applyCardSize(node, resizingCards.get(number) ?? cards.get(number).phone, columns);
+    }
+  }
+}
+
 function bindCard(card) {
-  card.addEventListener('dragstart', e => {
-    dragNumber = card.dataset.number;
-    card.classList.add('dragging');
-    e.dataTransfer.effectAllowed = 'move';
-  });
-  card.addEventListener('dragend', () => {
-    card.classList.remove('dragging');
-  });
-  card.addEventListener('dragover', e => {
+  card.addEventListener('pointerdown', e => {
+    const action = e.target.closest('button')?.dataset.action;
+    const kind = action === 'resize' ? 'resize' : 'move';
+    if (!e.isPrimary || e.button !== 0 || cardGesture) return;
+    if (kind === 'move' && (movingCard || (action !== 'move' && (action || e.pointerType !== 'mouse')))) return;
+    if (kind === 'resize' && resizingCards.has(card.dataset.number)) return;
+    const grid = card.parentElement;
+    const {columns, step} = gridMetrics(grid);
+    const phone = cards.get(card.dataset.number).phone;
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
+    if (action) e.target.closest('button').focus({preventScroll: true});
+    card.setPointerCapture(e.pointerId);
+    cardGesture = {
+      card, kind, pointer: e.pointerId, x: e.clientX, y: e.clientY, grid,
+      group: grid.parentElement.dataset.key, maxColumns: columns, step,
+      width: Math.min(phone.columns ?? 1, columns), height: card.offsetHeight,
+      target: null, size: null, started: false,
+    };
   });
-  card.addEventListener('drop', e => {
-    e.preventDefault();
-    const targetNumber = card.dataset.number;
-    if (!dragNumber || dragNumber === targetNumber) return;
-    reorderCards(dragNumber, targetNumber);
-    dragNumber = null;
+  card.addEventListener('lostpointercapture', cancelCardGesture);
+  card.addEventListener('keydown', e => {
+    const action = e.target.dataset.action;
+    if (action === 'move') moveWithKeyboard(e, card);
+    if (action === 'resize') resizeWithKeyboard(e, card);
   });
 }
 
-async function reorderCards(fromNum, toNum) {
-  const allCards = [...document.querySelectorAll('.card')];
-  const order = allCards.map(c => c.dataset.number);
-  const fromIdx = order.indexOf(fromNum);
-  const toIdx   = order.indexOf(toNum);
-  if (fromIdx === -1 || toIdx === -1) return;
-  order.splice(fromIdx, 1);
-  order.splice(toIdx, 0, fromNum);
-  await fetch('/reorder', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(order) });
-  refreshPhones();
+window.addEventListener('pointermove', moveCardGesture);
+window.addEventListener('pointerup', finishCardGesture);
+window.addEventListener('pointercancel', cancelCardGesture);
+window.addEventListener('blur', abortCardGesture);
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && cardGesture) abortCardGesture();
+});
+
+function finishCardGesture(e) {
+  const gesture = cardGesture;
+  if (gesture?.pointer !== e.pointerId) return;
+  const {card, kind, size, group, started} = gesture;
+  if (kind === 'move' && started) updateDropTarget(gesture, e.clientX, e.clientY);
+  const number = card.dataset.number;
+  const targetNumber = gesture.target?.dataset.number;
+  endCardGesture();
+  if (kind === 'move' && targetNumber) reorderCards(number, targetNumber, group);
+  if (kind === 'resize' && size) resizeCard(number, size);
+  updateMonitoring();
 }
 
-// ── Phone CRUD ───────────────────────────────────────────────────
-async function addPhone() {
-  const number = $('new-number').value.trim();
-  const name   = $('new-name').value.trim();
-  const ip     = $('new-ip').value.trim();
-  if (!number) { alert('Укажите номер'); return; }
-  const res = await fetch('/add_phone', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({number, name, ip})
-  });
-  const data = await res.json();
-  if (data.ok) {
-    $('new-number').value = '';
-    $('new-name').value = '';
-    $('new-ip').value = '';
-    refreshPhones();
-  } else { alert(data.error || 'Ошибка'); }
+function cancelCardGesture(e) {
+  if (cardGesture?.pointer === e.pointerId) abortCardGesture();
+}
+
+function abortCardGesture() {
+  if (!cardGesture) return;
+  endCardGesture();
+  updateMonitoring();
+}
+
+function moveCardGesture(e) {
+  const gesture = cardGesture;
+  if (gesture?.pointer !== e.pointerId) return;
+  const dx = e.clientX - gesture.x, dy = e.clientY - gesture.y;
+  if (!gesture.started && Math.hypot(dx, dy) < 6) return;
+  gesture.started = true;
+  gesture.card.classList.add('is-arranging');
+  if (gesture.kind === 'resize') {
+    const columns = dx === 0 ? gesture.width
+      : Math.min(8, gesture.maxColumns, Math.max(1, gesture.width + Math.round(dx / gesture.step)));
+    const height = Math.min(800, Math.max(0, Math.round(gesture.height + dy)));
+    const phone = cards.get(gesture.card.dataset.number).phone;
+    const min_height = Math.abs(dy) < 6 ? (phone.min_height ?? 0)
+      : height <= gesture.card.firstElementChild.offsetHeight ? 0 : height;
+    gesture.size = {columns: columns === gesture.width ? (phone.columns ?? 1) : columns, min_height};
+    applyCardSize(gesture.card, gesture.size, gesture.maxColumns);
+    return;
+  }
+  gesture.card.classList.add('dragging');
+  gesture.lastX = e.clientX;
+  gesture.lastY = e.clientY;
+  updateDropTarget(gesture, e.clientX, e.clientY);
+  if (!gesture.scrollFrame) gesture.scrollFrame = requestAnimationFrame(scrollWhileMoving);
+}
+
+function updateDropTarget(gesture, x, y) {
+  const target = document.elementFromPoint(x, y)?.closest('.card');
+  const next = target !== gesture.card && target?.parentElement === gesture.grid ? target : null;
+  if (next === gesture.target) return;
+  gesture.target?.classList.remove('drop-target');
+  next?.classList.add('drop-target');
+  gesture.target = next;
+}
+
+function scrollWhileMoving() {
+  const gesture = cardGesture;
+  if (!gesture) return;
+  gesture.scrollFrame = null;
+  const edge = 68;
+  const y = gesture.lastY;
+  const delta = y < edge ? (y - edge) / 4 : Math.max(0, y - (window.innerHeight - edge)) / 4;
+  if (Math.abs(delta) < 1) return;
+  const before = window.scrollY;
+  window.scrollBy(0, delta);
+  if (before === window.scrollY) return;
+  updateDropTarget(gesture, gesture.lastX, y);
+  gesture.scrollFrame = requestAnimationFrame(scrollWhileMoving);
+}
+
+function endCardGesture() {
+  const {card, pointer, target, scrollFrame} = cardGesture;
+  if (scrollFrame) cancelAnimationFrame(scrollFrame);
+  cardGesture = null;
+  if (card.hasPointerCapture(pointer)) card.releasePointerCapture(pointer);
+  card.classList.remove('is-arranging', 'dragging');
+  target?.classList.remove('drop-target');
+}
+
+function moveWithKeyboard(e, card) {
+  const backwards = ['ArrowLeft', 'ArrowUp'].includes(e.key);
+  if (!backwards && !['ArrowRight', 'ArrowDown'].includes(e.key)) return;
+  e.preventDefault();
+  const target = backwards ? card.previousElementSibling : card.nextElementSibling;
+  if (target) reorderCards(card.dataset.number, target.dataset.number, card.closest('.section').dataset.key);
+}
+
+function resizeWithKeyboard(e, card) {
+  const changes = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -20], ArrowDown: [0, 20], Home: [0, 0]};
+  const delta = changes[e.key];
+  if (!delta) return;
+  e.preventDefault();
+  const phone = cards.get(card.dataset.number).phone;
+  const max = gridMetrics(card.parentElement).columns;
+  const visible = Math.min(max, phone.columns ?? 1);
+  const width = Math.max(1, Math.min(8, max, visible + delta[0]));
+  const columns = e.key === 'Home' ? 1 : width === visible ? (phone.columns ?? 1) : width;
+  const height = delta[1] ? Math.min(800, card.offsetHeight + delta[1]) : phone.min_height ?? 0;
+  const min_height = e.key === 'Home' || height <= card.firstElementChild.offsetHeight ? 0 : height;
+  resizeCard(phone.number, {columns, min_height});
+}
+
+async function reorderCards(from_number, to_number, group) {
+  if (movingCard) return;
+  movingCard = true;
+  try {
+    await changeCard('/reorder', {from_number, to_number, group}, $('card-status'));
+  } finally {
+    movingCard = false;
+  }
+}
+
+async function resizeCard(number, {columns, min_height}) {
+  const phone = cards.get(number)?.phone;
+  if (!phone || resizingCards.has(number)) return;
+  if (columns === (phone.columns ?? 1) && min_height === (phone.min_height ?? 0)) return;
+  resizingCards.set(number, {columns, min_height});
+  updateCardSizes();
+  try {
+    await changeCard('/resize_phone', {number, columns, min_height}, $('card-status'));
+  } finally {
+    resizingCards.delete(number);
+    updateCardSizes();
+  }
+}
+
+window.addEventListener('resize', updateCardSizes);
+
+async function changeCard(url, body, status) {
+  status.hidden = true;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    if (res.status === 401) { location.href = '/login'; return false; }
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 409) refreshPhones();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'Не удалось сохранить изменения');
+    await refreshPhones();
+    return true;
+  } catch (error) {
+    status.textContent = error instanceof TypeError ? 'Нет связи с сервером' : error.message;
+    status.hidden = false;
+    return false;
+  }
+}
+
+function cardFields(prefix) {
+  return Object.fromEntries(['number', 'name', 'ip'].map(field => [field, $(prefix + '-' + field).value.trim()]));
+}
+
+async function addPhone(event) {
+  event.preventDefault();
+  const button = event.submitter;
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    if (await changeCard('/add_phone', cardFields('new'), $('card-status'))) event.target.reset();
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function deletePhone(number) {
-  if (!confirm(`Удалить ${number}?`)) return;
-  await fetch('/delete_phone', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({number}) });
-  refreshPhones();
+  if (!confirm('Удалить карточку ' + number + '?')) return;
+  await changeCard('/delete_phone', {number}, $('card-status'));
 }
 
 function openEdit(number, name, ip) {
@@ -1458,36 +1824,47 @@ function openEdit(number, name, ip) {
   $('edit-original-number').value = number;
   $('edit-name').value = name;
   $('edit-ip').value = ip;
-  $('edit-backdrop').classList.add('open');
+  $('edit-status').hidden = true;
+  $('edit-backdrop').showModal();
 }
-function closeEditModal(e) {
-  if (e && e.target !== $('edit-backdrop')) return;
-  $('edit-backdrop').classList.remove('open');
+
+function closeEditModal() {
+  $('edit-backdrop').close();
 }
-async function saveEdit() {
-  const old_number = $('edit-original-number').value;
-  const number = $('edit-number').value.trim();
-  const name   = $('edit-name').value.trim();
-  const ip     = $('edit-ip').value.trim();
-  const res = await fetch('/update_phone', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({old_number, number, name, ip})
-  });
-  const data = await res.json();
-  if (data.ok) { $('edit-backdrop').classList.remove('open'); refreshPhones(); }
-  else alert(data.error || 'Ошибка');
+
+async function saveEdit(event) {
+  event.preventDefault();
+  const button = event.submitter;
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    const body = {...cardFields('edit'), old_number: $('edit-original-number').value};
+    if (await changeCard('/update_phone', body, $('edit-status'))) closeEditModal();
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ── Tabs ─────────────────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => {
+    b.classList.remove('active');
+    b.removeAttribute('aria-current');
+  });
   $(`pane-${name}`).classList.add('active');
-  $(`tab-btn-${name}`).classList.add('active');
-  if (name === 'history')  loadHistory();
+  const tab = $('tab-btn-' + name);
+  tab.classList.add('active');
+  tab.setAttribute('aria-current', 'page');
+  if (name === 'monitoring') updateCardSizes();
+  if (name === 'history')  loadHistory(true);
   if (name === 'library')  { loadLibrary(); loadSharedStatus(); }
   if (name === 'accounts') loadUsers();
-  if (name === 'tests')    { initActionUrlTab(); loadRecentEvents(); }
+  if (name === 'tests') {
+    if (location.pathname === '/lab/monitor') $('virtual-phone-lab').href = '/lab';
+    initActionUrlTab();
+    loadRecentEvents();
+  }
 }
 
 // ── Logout ───────────────────────────────────────────────────────
@@ -1501,8 +1878,9 @@ async function loadSharedStatus() {
   const res = await fetch('/my_shared_status');
   const d = await res.json();
   const btn = $('shared-toggle-btn');
-  btn.textContent = d.shared ? '🔒 Сделать приватным' : '🌐 Сделать общим';
-  btn.className = `btn btn-sm ${d.shared ? 'btn-danger' : 'btn-ghost'}`;
+  btn.textContent = d.shared ? 'Закрыть доступ' : 'Открыть доступ';
+  btn.className = d.shared ? 'btn btn-sm btn-danger' : 'btn btn-sm btn-ghost';
+  btn.disabled = false;
 }
 async function toggleShared() {
   await fetch('/toggle_shared', {method:'POST'});
@@ -1536,59 +1914,127 @@ async function importSet(username) {
 }
 
 // ── History ──────────────────────────────────────────────────────
-async function loadHistory() {
-  historyPage = 1;
-  const number = $('hist-number').value;
-  const date   = $('hist-date').value;
-  const user   = $('hist-user')?.value || '';
+const historyPageSize = 25;
+let historyPage = 1;
+let historyRequest = 0;
+let historyLoading = false;
+let historyNeedsRefresh = false;
+let historyTimer = null;
+let historyNumbersKey = '';
+let historyUsersLoaded = false;
+let historyUsersPending = false;
+
+function syncHistoryNumbers(phones) {
+  const options = phones.map(p => [p.number, `${p.number} — ${p.name}`]);
+  const key = JSON.stringify(options);
+  if (key === historyNumbersKey) return;
+  historyNumbersKey = key;
+
+  const select = $('hist-number');
+  const selected = select.value;
+  if (selected && !options.some(([number]) => number === selected)) {
+    options.push([selected, selected]);
+  }
+  select.replaceChildren(new Option('Все номера', ''), ...options.map(([value, label]) => new Option(label, value)));
+  select.value = selected;
+}
+
+async function loadHistoryUsers(force) {
+  if (!currentUserInfo?.is_admin || historyUsersPending || (historyUsersLoaded && !force)) return;
+  historyUsersPending = true;
   try {
-    let url = `/history?page=${historyPage}&per_page=${historyPageSize}`;
-    if (number) url += `&number=${encodeURIComponent(number)}`;
-    if (date)   url += `&date=${encodeURIComponent(date)}`;
-    if (user)   url += `&user=${encodeURIComponent(user)}`;
-    const res = await fetch(url);
-    if (!res.ok) { renderHistEmpty(); return; }
-    const d = await res.json();
-    renderHistory(d);
-  } catch(e) { renderHistEmpty(); }
+    const res = await fetch('/admin/users');
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    if (!data.ok || !Array.isArray(data.users)) throw new Error();
+    const select = $('hist-user');
+    const selected = select.value;
+    select.replaceChildren(new Option('Все пользователи', ''),
+      ...data.users.map(({username}) => new Option(username, username)));
+    if ([...select.options].some(option => option.value === selected)) select.value = selected;
+    else if (selected) loadHistoryPage(1);
+    historyUsersLoaded = true;
+  } catch (e) {
+    historyUsersLoaded = false;
+  } finally {
+    historyUsersPending = false;
+  }
 }
-function histPage(dir) {
-  historyPage = Math.max(1, historyPage + dir);
-  loadHistoryPage();
+
+function loadHistory(refreshUsers = false) {
+  loadHistoryUsers(refreshUsers);
+  return loadHistoryPage(1);
 }
-async function loadHistoryPage() {
-  const number = $('hist-number').value;
-  const date   = $('hist-date').value;
-  const user   = $('hist-user')?.value || '';
-  let url = `/history?page=${historyPage}&per_page=${historyPageSize}`;
-  if (number) url += `&number=${encodeURIComponent(number)}`;
-  if (date)   url += `&date=${encodeURIComponent(date)}`;
-  if (user)   url += `&user=${encodeURIComponent(user)}`;
+
+function histPage(direction) {
+  const control = $(direction < 0 ? 'hist-prev' : 'hist-next');
+  if (!control.disabled) return loadHistoryPage(historyPage + direction);
+}
+
+function refreshHistoryQuietly() {
+  if (!$('pane-history').classList.contains('active')) return;
+  if (historyLoading) {
+    historyNeedsRefresh = true;
+  } else if (historyTimer === null) {
+    historyTimer = setTimeout(() => {
+      historyTimer = null;
+      if (!$('pane-history').classList.contains('active')) return;
+      if (historyLoading) historyNeedsRefresh = true;
+      else loadHistoryPage(historyPage, true);
+    }, 100);
+  }
+}
+
+async function loadHistoryPage(page, quiet = false) {
+  const request = ++historyRequest;
+  historyLoading = true;
+  const query = new URLSearchParams({page, per_page: historyPageSize});
+  for (const [field, value] of [
+    ['number', $('hist-number').value], ['date', $('hist-date').value], ['username', $('hist-user').value],
+  ]) {
+    if (value) query.set(field, value);
+  }
+  if (!quiet) renderHistoryMessage('Загрузка…');
   try {
-    const res = await fetch(url);
-    if (!res.ok) return;
-    const d = await res.json();
-    renderHistory(d);
-  } catch(e) {}
+    const res = await fetch(`/history?${query}`, {cache: 'no-store'});
+    if (request !== historyRequest) return;
+    if (res.status === 401) { location.href = '/login'; return; }
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    if (request === historyRequest) renderHistory(data, page);
+  } catch (e) {
+    if (!quiet && request === historyRequest) renderHistoryMessage('Не удалось загрузить историю. Нажмите «Обновить».');
+  } finally {
+    if (request === historyRequest) {
+      historyLoading = false;
+      if (historyNeedsRefresh) {
+        historyNeedsRefresh = false;
+        refreshHistoryQuietly();
+      }
+    }
+  }
 }
-function renderHistory(d) {
-  const tbody = $('hist-body');
+
+function renderHistory(d, page) {
   const rows = d.items || d.records || d.history || [];
   const total = d.total ?? rows.length;
   const pages = Math.ceil(total / historyPageSize) || 1;
 
-  if (rows.length === 0) { renderHistEmpty(); return; }
+  if (page > pages) { loadHistoryPage(pages); return; }
+  historyPage = page;
+  if (rows.length === 0) { renderHistoryMessage('Нет звонков по выбранным фильтрам.'); return; }
 
-  tbody.innerHTML = rows.map(r => {
+  $('hist-body').innerHTML = rows.map(r => {
     const dirClass = r.direction === 'in' ? 'dir-in' : 'dir-out';
     const dirLabel = r.direction === 'in' ? '↙ Входящий' : '↗ Исходящий';
+    const duration = Number.isFinite(r.duration) ? _fmtDur(Math.max(0, r.duration)) : (r.duration || '—');
     return `<tr>
       <td class="mono">${esc(r.datetime || r.time || (r.ts_start ? new Date(r.ts_start * 1000).toLocaleString('ru') : '—'))}</td>
       <td>${esc(r.number || r.local || '—')}</td>
       <td>${esc(r.peer || r.remote || '—')}</td>
       <td class="${dirClass}">${dirLabel}</td>
-      <td class="mono">${esc(r.duration || '—')}</td>
-      ${currentUserInfo?.is_admin ? `<td>${esc(r.user || '—')}</td>` : ''}
+      <td class="mono">${esc(duration)}</td>
+      ${currentUserInfo?.is_admin ? `<td>${esc(r.username || r.user || '—')}</td>` : ''}
     </tr>`;
   }).join('');
 
@@ -1596,9 +2042,12 @@ function renderHistory(d) {
   $('hist-prev').disabled = historyPage <= 1;
   $('hist-next').disabled = historyPage >= pages;
 }
-function renderHistEmpty() {
-  $('hist-body').innerHTML = `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">Нет данных</td></tr>`;
-  $('hist-page-info').textContent = '—';
+function renderHistoryMessage(message) {
+  const columns = currentUserInfo?.is_admin ? 6 : 5;
+  $('hist-body').innerHTML = `<tr><td colspan="${columns}" style="text-align:center;padding:30px;color:var(--text-muted)">${esc(message)}</td></tr>`;
+  $('hist-page-info').textContent = '';
+  $('hist-prev').disabled = true;
+  $('hist-next').disabled = true;
 }
 
 // ── Accounts ─────────────────────────────────────────────────────
@@ -1633,20 +2082,24 @@ async function registerUser() {
 
 // ── Tests ─────────────────────────────────────────────────────────
 async function sendTestEvent() {
-  const ip    = $('test-ip').value.trim();
+  const address = $('test-ip').value.trim();
   const state = $('test-state').value;
   const local = $('test-local').value.trim();
-  if (!ip || !local) { alert('Заполните IP и номер'); return; }
+  if (!address || !local) { alert('Заполните адрес и номер'); return; }
 
   let token = '';
   if (currentUserInfo) token = currentUserInfo.event_token || '';
 
-  const url = `http://${ip}:8000/event?token=${encodeURIComponent(token)}&state=${encodeURIComponent(state)}&local=${encodeURIComponent(local)}`;
   const log = $('test-log');
   log.classList.add('visible');
 
   try {
-    const res = await fetch(url);
+    const url = parseServerOrigin(address, location.protocol);
+    if (!address.includes('://') && !url.port && url.protocol === 'http:') url.port = '8000';
+    if (location.protocol === 'https:' && url.protocol !== 'https:') throw new Error('Укажите HTTPS-адрес.');
+    url.pathname = '/event';
+    url.search = new URLSearchParams({token, state, local}).toString();
+    const res = await fetch(url.href);
     const text = await res.text();
     log.textContent += `[${new Date().toLocaleTimeString()}] ${state} → ${local} : ${res.status} ${text}\n`;
   } catch(e) {
@@ -1676,7 +2129,7 @@ function defaultServerHost() {
 }
 
 async function initActionUrlTab() {
-  if (!$('test-ip').value) $('test-ip').value = location.hostname;
+  if (!$('test-ip').value) $('test-ip').value = location.origin;
   let users = currentUserInfo ? [currentUserInfo] : [];
   if (currentUserInfo?.is_admin) {
     try {
@@ -1751,18 +2204,22 @@ async function loadActionUrlPhones() {
   if (requestId === aurlRequest && username === $('aurl-user').value) selectActionUrlPhoneByIp();
 }
 
-function actionUrlOrigin() {
-  const raw = $('aurl-host').value || defaultServerHost();
+function parseServerOrigin(raw, scheme = 'http:') {
   const message = 'Укажите только адрес сервера: IP:порт или http(s)://адрес:порт, без пути и логина.';
   if (/[\u0000-\u001f\u007f]/.test(raw)) throw new Error(message);
   const input = raw.trim();
   if (!input || /\s/.test(input) || input.includes('\\')) throw new Error(message);
   let url;
-  try { url = new URL(input.includes('://') ? input : `http://${input}`); }
+  try { url = new URL(input.includes('://') ? input : `${scheme}//${input}`); }
   catch(e) { throw new Error(message); }
   if (!['http:', 'https:'].includes(url.protocol) || !url.hostname
       || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
     throw new Error(message);
+  return url;
+}
+
+function actionUrlOrigin() {
+  const url = parseServerOrigin($('aurl-host').value || defaultServerHost());
   return url.origin;
 }
 
@@ -2017,10 +2474,20 @@ async function copyAllActionUrls(btn) {
 
 // ── Журнал событий ────────────────────────────────────────────────
 let recentTimer = null;
+let recentLoading = false;
+let recentNeedsRefresh = false;
+
+function refreshOpenLogs() {
+  scheduleRecentEvents();
+  refreshHistoryQuietly();
+}
+
 function scheduleRecentEvents() {
-  if (!$('pane-tests').classList.contains('active')) return;
-  clearTimeout(recentTimer);
-  recentTimer = setTimeout(loadRecentEvents, 300);
+  if (!$('pane-tests').classList.contains('active') || recentTimer !== null) return;
+  recentTimer = setTimeout(() => {
+    recentTimer = null;
+    if ($('pane-tests').classList.contains('active')) loadRecentEvents();
+  }, 100);
 }
 function resolvedNote(e) {
   if (!e.number) return '<div class="aurl-en">Номер не определён. Для телефона с одним SIP-номером выберите его карточку в настройке Action URL выше.</div>';
@@ -2053,8 +2520,10 @@ function eventDiagnostics(e) {
     `<div>${esc(name)}: <span class="mono">${esc(value)}</span></div>`).join('')}</details>`;
 }
 async function loadRecentEvents() {
+  if (recentLoading) { recentNeedsRefresh = true; return; }
+  recentLoading = true;
   try {
-    const res = await fetch('/recent_events');
+    const res = await fetch('/recent_events', {cache: 'no-store'});
     if (!res.ok) return;
     const rows = (await res.json()).events || [];
     $('recent-body').innerHTML = rows.length ? rows.map(e => `
@@ -2067,7 +2536,50 @@ async function loadRecentEvents() {
         <td>${esc(e.user)}</td>
       </tr>`).join('')
       : `<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-muted)">Событий пока не было</td></tr>`;
-  } catch(e) {}
+  } catch (error) {
+    // Сохраняем последний успешно полученный журнал.
+  } finally {
+    recentLoading = false;
+    if (recentNeedsRefresh) {
+      recentNeedsRefresh = false;
+      scheduleRecentEvents();
+    }
+  }
+}
+
+let nodeUpdate = null;
+let nodeUpdateRequest = false;
+
+async function refreshNodeUpdate() {
+  if (!currentUserInfo?.is_admin || currentUserInfo.server_role !== 'node' || nodeUpdateRequest) return;
+  try {
+    const response = await fetch('/api/federation/v1/node/update', {cache: 'no-store'});
+    if (!response.ok) return;
+    nodeUpdate = await response.json();
+    const button = $('node-update');
+    button.hidden = !nodeUpdate.enabled || (!nodeUpdate.offer && !nodeUpdate.waiting);
+    button.disabled = nodeUpdate.waiting;
+    button.textContent = nodeUpdate.waiting ? 'Обновление…' : 'Обновить';
+    button.title = nodeUpdate.offer ? `Доступно ${nodeUpdate.offer.version}` : '';
+  } catch {
+    // Keep the last offer visible while the server is restarting.
+  }
+}
+
+async function requestNodeUpdate() {
+  if (!nodeUpdate?.offer || nodeUpdate.waiting || nodeUpdateRequest) return;
+  nodeUpdateRequest = true;
+  $('node-update').disabled = true;
+  try {
+    const response = await fetch('/api/federation/v1/node/update', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({package_id: nodeUpdate.offer.package_id}),
+    });
+    if (response.ok) $('node-update').textContent = 'Обновление…';
+  } finally {
+    nodeUpdateRequest = false;
+    await refreshNodeUpdate();
+  }
 }
 
 // ── User info & init ──────────────────────────────────────────────
@@ -2078,37 +2590,33 @@ async function initUserInfo() {
     currentUserInfo = await res.json();
     $('nav-user').textContent = currentUserInfo.username;
     if (currentUserInfo.is_admin) {
+      const federationLink = $('federation-link');
+      federationLink.hidden = currentUserInfo.server_role !== 'node';
       $('tab-btn-accounts').style.display = '';
       $('tab-btn-tests').style.display = '';
       $('hist-col-user').style.display = '';
       $('hist-user-wrap').style.display = '';
+      if (currentUserInfo.server_role === 'node') {
+        refreshNodeUpdate();
+        setInterval(refreshNodeUpdate, 5000);
+      }
     }
-    // populate hist number filter
-    const _pj = await (await fetch('/phones')).json();
-    const phones = Array.isArray(_pj) ? _pj : (_pj.phones ?? []);
-    const sel = $('hist-number');
-    phones.forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = p.number;
-      opt.textContent = `${p.number} — ${p.name}`;
-      sel.appendChild(opt);
-    });
-  } catch(e) {}
+  } catch (error) {
+    // Сведения о пользователе загружаются отдельно от карточек.
+  }
 }
 
-// ── Boot ─────────────────────────────────────────────────────────
-(async function() {
-  await initUserInfo();
-  initSocket();
-  refreshPhones();
-  $('conn-dot').className = 'conn-dot';
-  $('conn-text').textContent = 'Онлайн';
-})();
-
-// ESC to close modal
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') $('edit-backdrop').classList.remove('open');
+initUserInfo();
+initSocket();
+refreshLiveViews();
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshLiveViews();
 });
+window.addEventListener('online', refreshLiveViews);
+setInterval(() => {
+  if (!socket?.connected || !updatedAt || Date.now() - updatedAt.getTime() >= 15000) refreshLiveViews();
+}, 2000);
+
 </script>
 </body>
 </html>

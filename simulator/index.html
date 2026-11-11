@@ -17,6 +17,7 @@
     .keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.num-key{height:43px;border-radius:7px;border:1px solid #4b5a66;border-bottom-color:#0f1c25;background:linear-gradient(#3b4b58,#2a3945);box-shadow:0 2px 1px #09131a88,inset 0 1px #ffffff0d;color:#edf3f6;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1}.num-key:hover{background:linear-gradient(#4b606e,#354957)}.num-key:active{transform:translateY(1px);box-shadow:inset 0 2px 4px #07141b77}.digit{font:19px var(--sans);font-weight:450}.letters{font:7px var(--sans);letter-spacing:.13em;margin-top:3px;color:#91a7b5}.num-key[data-value="*"] .digit{font-size:24px;line-height:16px;padding-top:4px}.num-key[data-value="#"] .digit{font-size:19px}
     .modes{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:12px}.mode-btn{min-width:0;min-height:40px;padding:6px 2px;border:1px solid #3c505d;border-radius:6px;background:#202f3a;color:#a3b7c3;display:flex;flex-direction:column;align-items:center;gap:4px;font-size:8px;line-height:1.2;box-shadow:0 1px 1px #0b161b66}.mode-btn svg{width:15px;height:15px}.mode-btn:hover{background:#2e4350;color:#d9e7ed}.mode-btn.active{color:#9ce6d5;border-color:#508f7c;background:#2a493f;box-shadow:inset 0 0 10px #7de2c70a}.mode-btn.active.dnd{background:#5e4433;border-color:#ac7e58;color:#f5cc9e}.phone-footer{margin-top:14px;padding-top:12px;border-top:1px solid #41515a66;display:flex;align-items:center;justify-content:space-between;gap:7px}.quick-dials{display:flex;gap:5px}.quick-dial{border:1px solid #3c505d;border-radius:5px;background:#1c2a34;color:#a6bfcc;font:10px var(--mono);padding:5px 8px;display:flex;align-items:center;gap:5px}.quick-dial svg{width:11px;height:11px}.quick-dial:hover{background:#304651;color:#b8f0e2}.hardware-control{display:flex;gap:5px}.hardware-btn{height:26px;min-width:27px;padding:0 6px;background:#18252e;color:#7e98a7;border:1px solid #354954;border-radius:5px;display:flex;align-items:center;gap:4px;font-size:9px}.hardware-btn svg{width:13px;height:13px}.hardware-btn.active{color:#8edbc7;border-color:#4c786b}.hardware-btn.power.active{color:#afd8ca}.hardware-btn.power:not(.active){color:#edaf9e;border-color:#795047}.hardware-btn:hover{background:#2a3e49}.extra-controls{padding:11px 4px 0;color:#899eaa;font-size:10px}.extra-controls summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;color:#829ba9}.extra-controls summary::-webkit-details-marker{display:none}.extra-controls summary svg{width:13px;height:13px;transition:transform .15s}.extra-controls[open] summary svg{transform:rotate(180deg)}.extra-content{padding:10px 0 0;display:grid;gap:8px}.control-row{display:grid;grid-template-columns:100px minmax(0,1fr);align-items:center;gap:7px}.control-row label{font-size:10px;color:#a2b6c1}.control-row select{min-width:0;width:100%;color:#bcd0da;background:#17252e;border:1px solid #344b59;border-radius:5px;padding:5px 7px;font-size:10px}.transfer-row{display:flex;gap:5px}.transfer-btn{display:flex;align-items:center;justify-content:center;background:#243c44;border:1px solid #436670;color:#b8d9dc;border-radius:5px;padding:4px 7px}.transfer-btn svg{width:13px;height:13px}.station-meta{display:flex;justify-content:space-between;color:#5e7583;font:9px var(--mono);padding:10px 5px 0}.device.is-busy::after{content:"";position:absolute;right:11px;top:13px;width:4px;height:4px;border-radius:50%;background:var(--accent);animation:pulse .5s infinite}.loading{grid-column:1/-1;border:1px dashed #3c5058;border-radius:16px;padding:70px 25px;color:var(--muted);text-align:center;font-size:13px}
     .lower-grid{margin-top:31px;display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:22px;align-items:start}.section-panel{border:1px solid var(--line);border-radius:10px;background:#151f25;overflow:hidden}.section-head{padding:15px 18px;display:flex;align-items:center;justify-content:space-between;gap:15px;border-bottom:1px solid var(--line)}.section-title{font-size:13px;font-weight:550;display:flex;align-items:center;gap:9px}.section-title svg{width:16px;height:16px;color:var(--accent)}.section-kicker{font:9px var(--mono);text-transform:uppercase;letter-spacing:.1em;color:#6e8794;margin-top:3px}.monitor-frame{width:100%;height:640px;background:#0e151b;border:0;display:block}.monitor-controls{display:flex;align-items:center;gap:10px}.collapse-monitor{border:0;background:transparent;color:#829da9;display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0}.collapse-monitor:hover{color:var(--text)}.monitor-hidden .monitor-frame{display:none}.monitor-hidden .collapse-monitor svg{transform:rotate(180deg)}.monitor-hidden .section-head{border-bottom:0}.event-count{font:10px var(--mono);color:#6e8996;border:1px solid #30434e;border-radius:4px;padding:1px 6px}.event-list{list-style:none;padding:0 16px;margin:0;max-height:640px;min-height:160px;overflow:auto;scrollbar-width:thin;scrollbar-color:#3b525e transparent}.event{padding:13px 0 12px;border-bottom:1px solid #27363e;display:grid;grid-template-columns:31px minmax(0,1fr);gap:9px}.event:last-child{border-bottom:0}.event-phone{height:25px;border:1px solid #345348;background:#20362f;color:#9bc8b8;border-radius:5px;font:10px var(--mono);display:grid;place-items:center}.event-name{font-size:11px;color:#c2d4dd;overflow-wrap:anywhere}.event-details{display:flex;align-items:center;gap:7px;color:#678391;font:9px var(--mono);margin-top:3px}.event-time{margin-left:auto;white-space:nowrap}.empty-events{padding:29px 5px;color:#69828f;font-size:12px;line-height:1.7}.lab-footer{margin-top:23px;display:flex;justify-content:space-between;gap:16px;color:#607987;font-size:10px}.lab-footer span{display:flex;align-items:center;gap:6px}.lab-footer svg{width:12px;height:12px}.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#263a42;color:#e0edf0;border:1px solid #4b6c75;box-shadow:0 6px 30px #0005;border-radius:8px;padding:12px 18px;font-size:12px;max-width:min(90vw,560px);z-index:10}.toast[hidden]{display:none}.toast.error{background:#412a30;border-color:#936168;color:#ffdad7}
+    .single-event-panel{margin-top:26px}.single-event-panel summary{cursor:pointer;padding:13px 16px;color:var(--text);font-weight:550}.single-event-form{padding:0 16px 16px}.single-event-form p{margin:0 0 12px;color:var(--muted);font-size:12px}.single-event-fields{display:flex;gap:12px;align-items:end;flex-wrap:wrap}.single-event-fields label{display:grid;gap:5px;font-size:12px;color:var(--muted);min-width:0}.single-event-fields label:nth-child(2){flex:1 1 240px}.single-event-fields select{min-width:0;max-width:100%;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--text);padding:7px 8px}.single-event-fields button{min-height:36px}.single-event-form [role=status]{margin:8px 0 0}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
     @media(min-width:1550px){main,.topbar-inner{max-width:1490px}.device{padding-left:20px;padding-right:20px}.device-face{gap:17px;grid-template-columns:42px minmax(0,1fr)}.handset{width:40px}.handset::before,.handset::after{width:42px}.lcd{height:151px}.keypad .num-key{height:45px}.modes .mode-btn{min-height:42px}}
     @media(max-width:1110px){main{padding:28px 22px 34px}.topbar-inner{padding:17px 22px}.phones-grid{gap:14px}.device{padding:15px 12px 12px}.device-face{grid-template-columns:28px minmax(0,1fr);gap:8px}.handset{width:27px;height:339px}.handset::before,.handset::after{width:29px;height:76px;left:-2px}.handset-lab{left:11px;width:29px}.lcd{padding:9px 9px}.mode-btn{font-size:7px}.quick-dial{padding:5px 6px}.lower-grid{grid-template-columns:minmax(0,1fr) 275px}.station-name{font-size:12px}.station-identity{gap:7px}.control-row{grid-template-columns:91px minmax(0,1fr)}}
@@ -53,6 +54,19 @@
     <section class="intro" aria-labelledby="page-title"><div><div class="eyebrow">Локальный стенд · 3 телефона</div><h1 id="page-title">Три виртуальных телефона</h1><p>Набери <strong>102</strong> на телефоне <strong>101</strong>, позвони и сними трубку на втором.</p></div><button class="outline-btn" type="button" id="reset"><svg class="icon"><use href="#i-reset"/></svg>Сбросить телефоны</button></section>
     <div class="error-banner" id="error-banner" role="alert" hidden><span id="error-text"></span><button type="button" id="dismiss-error" aria-label="Скрыть ошибку">×</button></div>
     <section class="phones-grid" id="phones" aria-label="Виртуальные телефоны"><div class="loading">Подключаем три виртуальных телефона…</div></section>
+    <details class="section-panel single-event-panel" id="single-event-panel">
+      <summary>Отправить отдельное событие Action URL</summary>
+      <form class="single-event-form" id="single-event-form">
+        <p>Событие поступит в мониторинг. Перед новым звонком сбрось телефоны.</p>
+        <div class="single-event-fields">
+          <label>Телефон<select id="single-phone" name="phone" required></select></label>
+          <label>Событие<select id="single-event" name="event" required></select></label>
+          <label>Собеседник<select id="single-remote" name="remote"></select></label>
+          <button class="outline-btn" id="single-send" type="submit" disabled>Отправить</button>
+        </div>
+        <p id="single-status" role="status"></p>
+      </form>
+    </details>
     <div class="lower-grid">
       <section class="section-panel" id="monitor" aria-labelledby="monitor-title"><div class="section-head"><div><div class="section-title" id="monitor-title"><svg class="icon"><use href="#i-screen"/></svg>Мониторинг SIP</div><div class="section-kicker" id="monitor-delivery">Настоящая панель · живые события</div></div><div class="monitor-controls"><a class="text-link" href="/lab/monitor" target="_blank" rel="noopener">Открыть отдельно<svg class="icon"><use href="#i-out"/></svg></a><button class="collapse-monitor" id="collapse-monitor" type="button" aria-label="Свернуть мониторинг" aria-expanded="true"><svg class="icon"><use href="#i-chevron"/></svg></button></div></div><iframe class="monitor-frame" id="monitor-frame" title="Настоящая панель Monitoring SIP" src="/lab/monitor"></iframe></section>
       <section class="section-panel journal-panel" aria-labelledby="journal-title"><div class="section-head"><div><div class="section-title" id="journal-title"><svg class="icon"><use href="#i-wave"/></svg>События телефонов</div><div class="section-kicker">Action URL → мониторинг</div></div><span class="event-count" id="event-count">0</span></div><ol class="event-list" id="events"><li class="empty-events">Здесь появятся события.<br>Начни с первого звонка.</li></ol></section>
@@ -69,6 +83,7 @@
     const eventLabels = {setup_completed:'Телефон включён',registered:'Регистрация',unregistered:'Регистрация отключена',register_failed:'Ошибка регистрации',off_hook:'Трубка снята',on_hook:'Трубка положена',incoming_call:'Входящий вызов',outgoing_call:'Исходящий вызов',call_established:'Соединение установлено',call_terminated:'Вызов завершён',dnd_on:'DND включён',dnd_off:'DND выключен',always_fwd_on:'Переадресация включена',always_fwd_off:'Переадресация выключена',hold:'Удержание',unhold:'Возврат к разговору',held:'Удержание у собеседника',unheld:'Собеседник вернулся',mute:'Микрофон выключен',unmute:'Микрофон включён',missed_call:'Пропущенный вызов',idle_to_busy:'Телефон занят',busy_to_idle:'Телефон свободен',reject_incoming_call:'Вызов отклонён',answer_new_incoming_call:'Ответ на новый вызов',transfer_failed:'Ошибка перевода',transfer_finished:'Вызов переведён',blind_transfer_call:'Перевод вызова',attended_transfer_call:'Перевод с консультацией',forward_incoming_call:'Вызов переадресован',headset:'Гарнитура',handfree:'Громкая связь',cancel_callout:'Исходящий отменён',remote_busy:'Абонент занят',call_remote_canceled:'Звонящий отменил вызов'};
     const letters = {'1':'','2':'ABC','3':'DEF','4':'GHI','5':'JKL','6':'MNO','7':'PQRS','8':'TUV','9':'WXYZ','*':'','0':'+','#':''};
     let lab = null, built = false, pollRunning = false, requestId = 0, appliedId = 0, eventsSignature = '', toastTimer;
+    let catalogReady = false, catalogLoading = false, singleRunning = false;
     const busy = new Set(), drafts = new Map(), dirty = new Set(), draftVersions = new Map(), queues = new Map(), pendingCommands = new Map();
     const editActions = new Set(['digit','backspace','clear']);
     function edited(number, value) {
@@ -106,6 +121,8 @@
           if (event.key === 'Escape') { event.preventDefault(); invoke(p.number, 'hangup'); }
         });
       }
+      $('single-phone').replaceChildren(...phones.map(p => new Option(`${p.number} · ${p.name}`, p.number)));
+      updateSingleRemote(phones);
       built = true;
     }
     function durationText(duration) {
@@ -176,7 +193,39 @@
         $('monitor-delivery').title = failed ? String(monitor.error || 'Нет подтверждения от мониторинга') : 'События проходят через обычный HTTP /event';
       }
       renderEvents(state.events || []);
+      updateSingleControls();
       connection(true);
+    }
+    function updateSingleRemote(phones) {
+      const remote = $('single-remote'), previous = remote.value, local = $('single-phone').value;
+      const peers = phones.filter(phone => phone.number !== local);
+      remote.replaceChildren(new Option('Без номера', ''), ...peers.map(p => new Option(p.number, p.number)));
+      if (peers.some(phone => phone.number === previous)) remote.value = previous;
+    }
+    function updateSingleControls() {
+      const activeCall = lab?.phones.some(phone => ['ringing','calling','connected','held'].includes(phone.state));
+      $('single-send').disabled = !catalogReady || !lab || Boolean(activeCall) || singleRunning || $('reset').disabled;
+      $('single-send').title = activeCall ? 'Заверши текущий звонок' : '';
+    }
+    async function loadEventCatalog() {
+      if (catalogReady || catalogLoading) return;
+      const status = $('single-status');
+      catalogLoading = true;
+      status.textContent = 'Загрузка каталога…';
+      try {
+        const result = await request('/lab/api/action-url-events');
+        $('single-event').replaceChildren(...result.events.map(item => {
+          eventLabels[item.key] ??= item.ru;
+          return new Option(`${item.ru} (${item.key})`, item.key);
+        }));
+        catalogReady = true;
+        status.textContent = '';
+      } catch (error) {
+        status.textContent = 'Каталог недоступен. Сверни и открой форму ещё раз.';
+      } finally {
+        catalogLoading = false;
+        updateSingleControls();
+      }
     }
     function eventTime(at) {
       if (typeof at === 'string' && /^\d{2}:\d{2}/.test(at)) return at.slice(0,8);
@@ -190,7 +239,7 @@
       $('event-count').textContent = events.length;
       if (!events.length) { $('events').innerHTML = '<li class="empty-events">Здесь появятся события.<br>Начни с первого звонка.</li>'; return; }
       const items = events.slice(-40).reverse();
-      $('events').innerHTML = items.map(e=>`<li class="event"><span class="event-phone">${escapeHtml(e.phone)}</span><div><div class="event-name">${escapeHtml(eventLabels[e.state] || e.state)}</div><div class="event-details"><span>${escapeHtml(e.state)}</span>${e.remote?`<span>→ ${escapeHtml(e.remote)}</span>`:''}<time class="event-time">${escapeHtml(eventTime(e.at))}</time></div></div></li>`).join('');
+      $('events').innerHTML = items.map(e=>`<li class="event"><span class="event-phone">${escapeHtml(e.phone)}</span><div><div class="event-name">${escapeHtml(eventLabels[e.state] || e.state)}</div><div class="event-details"><span>${escapeHtml(e.state)}</span>${e.source==='manual'?'<span>Вручную</span>':''}${e.remote?`<span>→ ${escapeHtml(e.remote)}</span>`:''}<time class="event-time">${escapeHtml(eventTime(e.at))}</time></div></div></li>`).join('');
     }
     function connection(online) {
       $('connection').className = `connection ${online?'online':'failed'}`;
@@ -261,12 +310,39 @@
     $('phones').addEventListener('change',event=>{
       const select=event.target.closest('select[data-setting]'); if(select) invoke(select.dataset.phone,select.dataset.setting,select.value);
     });
+    $('single-event-panel').addEventListener('toggle',()=>{if($('single-event-panel').open)loadEventCatalog();});
+    $('single-phone').addEventListener('change',()=>{if(lab)updateSingleRemote(lab.phones);});
+    $('single-event-form').addEventListener('submit',async event=>{
+      event.preventDefault();
+      if ($('single-send').disabled) return;
+      const payload = Object.fromEntries(new FormData(event.currentTarget));
+      const status = $('single-status');
+      singleRunning = true;
+      $('reset').disabled = true;
+      updateSingleControls();
+      status.textContent = 'Отправка…';
+      try {
+        await Promise.all([...queues.values()]);
+        const id = ++requestId;
+        const result = await request('/lab/api/action-url-event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+        render(result,id);
+        status.textContent = 'Мониторинг принял событие.';
+      } catch (error) {
+        status.textContent = error.name === 'AbortError' ? 'Мониторинг не подтвердил отправку.' : error.message;
+      } finally {
+        singleRunning = false;
+        $('reset').disabled = false;
+        updateSingleControls();
+        poll();
+      }
+    });
     $('reset').addEventListener('click',async()=>{
       if ($('reset').disabled) return;
       $('reset').disabled=true;
+      updateSingleControls();
       try { await Promise.all([...queues.values()]); const state=await request('/lab/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); dirty.clear(); drafts.clear(); render(state,++requestId); toast('Телефоны сброшены. История мониторинга сохранена.'); }
       catch(error){toast(error.message,true);}
-      finally{$('reset').disabled=false;}
+      finally{$('reset').disabled=false;updateSingleControls();}
     });
     $('dismiss-error').addEventListener('click',()=>{$('error-banner').hidden=true;});
     $('collapse-monitor').addEventListener('click',()=>{

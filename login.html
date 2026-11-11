@@ -3,10 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
-<title>SIP Monitor — Вход</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="/static/monitor.svg">
+<title>Вход · Иней by Стёпчик</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -164,7 +162,7 @@
     box-shadow: 0 0 24px rgba(59,130,246,.2), 0 8px 20px rgba(0,0,0,.3);
   }
 
-  .logo-icon svg {
+  .logo-icon img {
     width: 30px;
     height: 30px;
   }
@@ -403,45 +401,37 @@
 
     <div class="logo-area">
       <div class="logo-icon">
-        <svg viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="15" cy="15" r="6" stroke="#60a5fa" stroke-width="1.5"/>
-          <circle cx="15" cy="15" r="11" stroke="#3b82f6" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
-          <circle cx="15" cy="15" r="2.5" fill="#93c5fd"/>
-          <path d="M15 4 L15 8" stroke="#60a5fa" stroke-width="1.5" stroke-linecap="round"/>
-          <path d="M15 22 L15 26" stroke="#60a5fa" stroke-width="1.5" stroke-linecap="round"/>
-          <path d="M4 15 L8 15" stroke="#60a5fa" stroke-width="1.5" stroke-linecap="round"/>
-          <path d="M22 15 L26 15" stroke="#60a5fa" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
+        <img src="/static/monitor.svg" alt="" width="30" height="30">
       </div>
-      <div class="logo-title">SIP Monitor</div>
-      <div class="logo-sub">Rel 1.2 · Панель мониторинга</div>
+      <div class="logo-title">Иней</div>
+      <div class="logo-sub">by Стёпчик</div>
     </div>
 
-    <div class="form" id="login-form">
+    <form class="form" id="login-form" method="post" action="/login">
       <div class="field">
-        <div class="field-label">Логин</div>
+        <label class="field-label" for="username">Логин</label>
         <div class="field-wrap">
           <svg class="field-icon" viewBox="0 0 16 16" fill="none">
             <circle cx="8" cy="5.5" r="2.5" stroke="currentColor" stroke-width="1.3"/>
             <path d="M2.5 13.5C2.5 11.015 5.015 9 8 9s5.5 2.015 5.5 4.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
           </svg>
-          <input class="input" id="username" type="text" placeholder="Введите логин" autocomplete="username" autocapitalize="off">
+          <input class="input" id="username" name="username" type="text" placeholder="Введите логин" autocomplete="username" autocapitalize="off">
         </div>
       </div>
 
       <div class="field">
-        <div class="field-label">Пароль</div>
+        <label class="field-label" for="password">Пароль</label>
         <div class="field-wrap">
           <svg class="field-icon" viewBox="0 0 16 16" fill="none">
             <rect x="3" y="7" width="10" height="7" rx="2" stroke="currentColor" stroke-width="1.3"/>
             <path d="M5.5 7V5a2.5 2.5 0 015 0v2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
             <circle cx="8" cy="10.5" r="1" fill="currentColor"/>
           </svg>
-          <input class="input" id="password" type="password" placeholder="Введите пароль" autocomplete="current-password">
+          <input class="input" id="password" name="password" type="password" placeholder="Введите пароль" autocomplete="current-password">
         </div>
       </div>
 
-      <div class="error-box" id="error-box">
+      <div class="error-box" id="error-box" role="alert">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
           <circle cx="7" cy="7" r="6" stroke="#ef4444" stroke-width="1.2"/>
           <path d="M7 4v3.5" stroke="#ef4444" stroke-width="1.3" stroke-linecap="round"/>
@@ -450,13 +440,13 @@
         <span id="error-text">Неверный логин или пароль</span>
       </div>
 
-      <button class="btn-submit" id="btn-login" onclick="doLogin()">
+      <button class="btn-submit" id="btn-login" type="submit">
         <span class="btn-text">Войти</span>
-        <span class="btn-spinner"><div class="spinner-ring"></div></span>
+        <span class="btn-spinner" aria-hidden="true"><span class="spinner-ring"></span></span>
       </button>
 
       <div class="enter-hint" id="enter-hint">Нажмите Enter для входа</div>
-    </div>
+    </form>
 
     <div class="card-footer">
       <div class="status-dot"></div>
@@ -467,6 +457,7 @@
 </div>
 
 <script>
+  const form = document.getElementById('login-form');
   const usernameEl = document.getElementById('username');
   const passwordEl = document.getElementById('password');
   const errorBox   = document.getElementById('error-box');
@@ -479,9 +470,6 @@
     el.addEventListener('input', () => {
       hint.classList.toggle('active', usernameEl.value.length > 0 && passwordEl.value.length > 0);
     });
-    el.addEventListener('keydown', e => {
-      if (e.key === 'Enter') doLogin();
-    });
   });
 
   function showError(msg) {
@@ -492,15 +480,19 @@
     errorBox.classList.add('visible');
   }
 
-  async function doLogin() {
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (btn.disabled) return;
     const username = usernameEl.value.trim();
     const password = passwordEl.value;
 
     if (!username || !password) {
       showError('Заполните все поля');
+      (username ? passwordEl : usernameEl).focus();
       return;
     }
 
+    btn.disabled = true;
     btn.classList.add('loading');
     errorBox.classList.remove('visible');
 
@@ -510,30 +502,31 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
+      const data = await res.json().catch(() => null);
 
-      const data = await res.json();
-
-      if (data.ok) {
-        // success — brief green flash then redirect
+      if (res.ok && data?.ok) {
         btn.style.background = 'linear-gradient(135deg, #16a34a, #15803d)';
-        btn.querySelector('.btn-text').textContent = 'Вход...';
+        btn.querySelector('.btn-text').textContent = 'Вход…';
         btn.classList.remove('loading');
-        setTimeout(() => { window.location.href = '/'; }, 300);
-      } else {
-        btn.classList.remove('loading');
-        showError(data.error || 'Неверный логин или пароль');
+        setTimeout(() => window.location.replace('/'), 300);
+        return;
+      }
+
+      showError(data?.error || 'Не удалось войти');
+      if (res.status === 401) {
         passwordEl.value = '';
         passwordEl.focus();
       }
-    } catch (e) {
-      btn.classList.remove('loading');
+    } catch {
       showError('Ошибка соединения с сервером');
     }
-  }
 
-  // Focus username on load
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  });
+
   window.addEventListener('DOMContentLoaded', () => {
-    setTimeout(() => usernameEl.focus(), 500);
+    if (document.activeElement === document.body) usernameEl.focus();
   });
 </script>
 </body>

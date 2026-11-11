@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, send_file, session, redirect, url_for
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, join_room
 from flask import has_request_context
 import json
 import time
@@ -11,6 +11,7 @@ import socket
 import sqlite3
 import os
 import logging
+import tempfile
 import traceback
 import urllib.request
 import urllib.parse
@@ -19,9 +20,14 @@ from collections import deque
 from pathlib import Path
 from functools import wraps
 from datetime import timedelta, datetime
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
+from uuid import uuid4
+from werkzeug.exceptions import HTTPException
 from werkzeug.security import generate_password_hash, check_password_hash
+from federation_logs import FederationJournal, JournalError
+from federation_node import FederationError, NodeSync, init_node_tables, make_opener, queue_call, validate_endpoint
 
 app = Flask(__name__)
 
@@ -39,11 +45,16 @@ access_logger = logging.getLogger("werkzeug")
 if not any(getattr(item, "__name__", "") == "redact_access_log" for item in access_logger.filters):
     access_logger.addFilter(redact_access_log)
 
+def socket_origin_allowed(origin, environ):
+    host = environ.get("HTTP_HOST")
+    return host and origin == f"{environ['wsgi.url_scheme']}://{host}"
+
+
 # allow_upgrades=True — используем WebSocket если доступен, иначе polling
 # ping_timeout/ping_interval — агрессивное обнаружение потери соединения
 socketio = SocketIO(
     app,
-    cors_allowed_origins="*",
+    cors_allowed_origins=socket_origin_allowed,
     async_mode='threading',
     ping_timeout=25,
     ping_interval=10,
@@ -51,7 +62,7 @@ socketio = SocketIO(
 
 # Меняется с каждым выпуском: открытые панели сравнивают её с запомненной
 # при первом подключении и предлагают перезагрузить страницу
-VERSION = "Rel 1.2"
+VERSION = "Rel 1.3.2"
 
 PHONES_DIR = Path("users_data")
 AUTH_FILE = Path("auth.json")
@@ -60,8 +71,7 @@ BLOCKS_FILE = Path("users_data/login_blocks.json")
 DB_FILE = Path("users_data/call_history.db")
 LOG_FILE = Path("users_data/app.log")
 
-if not PHONES_DIR.exists():
-    PHONES_DIR.mkdir()
+PHONES_DIR.mkdir(mode=0o700, exist_ok=True)
 
 # ─── Логгер ─────────────────────────────────────────────────────────────────
 
@@ -115,6 +125,10 @@ def alog(cat: str, level: str = "INFO", **fields) -> None:
 
 connected_sids: set[str] = set()
 _sids_lock = threading.Lock()
+_emit_lock = threading.Lock()
+_library_room = "shared-sets"
+_ping_update_lock = threading.Lock()
+_ping_update_users: set[str] = set()
 
 # Rate-limit для /client_log: не более 120 записей в минуту с одного IP
 _client_rate: dict = {}
@@ -129,7 +143,7 @@ closed_call_ids: dict[tuple[str, str], dict[str, float]] = {}
 phone_flags = {}   # {number: {dnd, fwd_*, mute, audio, reg, missed, ...}} — функции из Action URL
 mac_numbers = {}   # {(username, mac): {number}} — выучено из событий с номером и $mac
 recent_events = deque(maxlen=300)  # последние /event — журнал на вкладке «Тесты»
-lock = threading.Lock()
+lock = threading.RLock()
 
 LOGIN_MAX_ATTEMPTS = 7
 LOGIN_BLOCK_SECONDS = 900  # 15 минут
@@ -177,7 +191,8 @@ def is_event_rate_limited(ip: str) -> bool:
     rec["count"] += 1
     return rec["count"] > EVENT_RATE_LIMIT
 
-API_AUTH_ROUTES = {"/phones", "/add_phone", "/update_phone", "/delete_phone", "/reorder", "/yealink/inspect"}
+API_AUTH_ROUTES = {"/phones", "/add_phone", "/update_phone", "/delete_phone", "/resize_phone",
+                   "/reorder", "/yealink/inspect"}
 
 
 def get_local_ip():
@@ -203,10 +218,34 @@ def get_env_value(key: str, default: str = "") -> str:
     return default
 
 
+def setting(key: str, default: str = "") -> str:
+    return os.environ.get(key, get_env_value(key, default))
+
+
+local_role = setting("MONITORING_SIP_ROLE", "standalone").strip().lower()
+if local_role not in {"standalone", "node", "slave"}:
+    raise ValueError("Недопустимая роль узла.")
+ROLE = "node" if local_role in {"node", "slave"} else "standalone"
+LISTEN_HOST = setting("MONITORING_SIP_HOST", "0.0.0.0")
+LISTEN_PORT = int(setting("MONITORING_SIP_PORT", "8000"))
+
+journal = None
+if ROLE != "standalone":
+    try:
+        journal = FederationJournal(PHONES_DIR / "federation_journal.db")
+    except JournalError:
+        alog("FEDERATION_JOURNAL_UNAVAILABLE", "ERROR")
+
+
+def journal_record(kind, **fields):
+    if journal is not None:
+        journal.record(kind, **fields)
+
+
 # Куда дублировать GET-запросы (центральный сервер). Только из .env, без адреса
 # по умолчанию: не задан — дублирования нет
-TARGET_IP = get_env_value("TARGET_IP", "")
-TARGET_PORT = int(get_env_value("TARGET_PORT", "8000"))
+TARGET_IP = get_env_value("TARGET_IP", "") if ROLE == "standalone" else ""
+TARGET_PORT = int(get_env_value("TARGET_PORT", "8000")) if TARGET_IP else 8000
 
 
 def duplicate_get_request(url_path, query_params):
@@ -231,8 +270,13 @@ def duplicate_get_request(url_path, query_params):
 
 @app.before_request
 def before_request_func():
-    if request.method == "GET" and TARGET_IP and LOCAL_IP != TARGET_IP:
+    if ROLE == "standalone" and request.method == "GET" and TARGET_IP and LOCAL_IP != TARGET_IP:
         duplicate_get_request(request.path, request.args.to_dict())
+
+    origin = request.headers.get("Origin")
+    if (request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and origin is not None and origin != request.host_url.rstrip("/")):
+        return jsonify(ok=False, error="Запрос с другого сайта."), 403
 
     query = {key: value for key, value in request.args.items()
              if key.lower() not in {"token", "event_token", "password"}}
@@ -246,6 +290,9 @@ def before_request_func():
 
 @app.errorhandler(Exception)
 def handle_exception(e):
+    if isinstance(e, HTTPException):
+        return e
+    journal_record("service_exception")
     alog("UNHANDLED_EXCEPTION", "ERROR",
          error=str(e),
          traceback=traceback.format_exc(),
@@ -257,6 +304,11 @@ def handle_exception(e):
 
 @socketio.on("connect")
 def on_ws_connect():
+    username = authenticated_user()
+    if not username:
+        return False
+    join_room(f"phones:{username}")
+    join_room(_library_room)
     with _sids_lock:
         connected_sids.add(request.sid)
         total = len(connected_sids)
@@ -264,7 +316,7 @@ def on_ws_connect():
          sid=request.sid[:10],
          total_clients=total,
          ip=get_client_ip(),
-         user=session.get("username"))
+         user=username)
     socketio.emit("server_version", {"version": VERSION}, to=request.sid)
 
 
@@ -300,10 +352,9 @@ def load_or_create_auth() -> dict:
     
     auth_data = {username: user_data}
 
-    AUTH_FILE.write_text(
-        json.dumps(auth_data, indent=2, ensure_ascii=False),
-        encoding="utf-8"
-    )
+    with os.fdopen(os.open(AUTH_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
+                   "w", encoding="utf-8") as stream:
+        json.dump(auth_data, stream, indent=2, ensure_ascii=False)
 
     print("=" * 70)
     print("Создан файл auth.json")
@@ -327,7 +378,7 @@ def get_app_secret():
                 return line.split("=", 1)[1]
     
     key = secrets.token_hex(32)
-    with open(ENV_FILE, "a") as f:
+    with os.fdopen(os.open(ENV_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), "a") as f:
         f.write(f"APP_SECRET_KEY={key}\n")
     return key
 
@@ -336,17 +387,23 @@ app.secret_key = get_app_secret()
 app.permanent_session_lifetime = timedelta(hours=12)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_SECURE"] = False  # для локального HTTP оставляем False
 
 
 def is_api_route(path: str) -> bool:
     return path in API_AUTH_ROUTES
 
 
+def authenticated_user():
+    username = session.get("username")
+    if session.get("logged_in") is True and isinstance(username, str) and username in AUTH:
+        return username
+    return None
+
+
 def login_required(view_func):
     @wraps(view_func)
     def wrapper(*args, **kwargs):
-        if session.get("logged_in") is True:
+        if authenticated_user():
             return view_func(*args, **kwargs)
 
         if is_api_route(request.path):
@@ -357,9 +414,6 @@ def login_required(view_func):
 
 
 def get_client_ip() -> str:
-    forwarded = request.headers.get("X-Forwarded-For", "").strip()
-    if forwarded:
-        return forwarded.split(",")[0].strip()
     return request.remote_addr or "unknown"
 
 
@@ -419,6 +473,8 @@ def init_db() -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ts    ON call_log(ts_start)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_local ON call_log(local)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_user  ON call_log(username)")
+    if ROLE == "node":
+        init_node_tables(conn)
     conn.commit()
     conn.close()
     os.chmod(DB_FILE, 0o600)
@@ -427,14 +483,16 @@ def init_db() -> None:
 def insert_call(ts_start: float, ts_end: float, duration: int,
                 local: str, remote: str, direction: str, username: str) -> None:
     try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.execute(
-            "INSERT INTO call_log (ts_start,ts_end,duration,local,remote,direction,username)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (ts_start, ts_end, duration, local, remote, direction, username)
-        )
-        conn.commit()
-        conn.close()
+        with closing(sqlite3.connect(DB_FILE)) as conn, conn:
+            conn.execute(
+                "INSERT INTO call_log (ts_start,ts_end,duration,local,remote,direction,username)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (ts_start, ts_end, duration, local, remote, direction, username),
+            )
+            if ROLE == "node":
+                phone = users_phones.get(username, {}).get(local, {})
+                queue_call(conn, ts_start, ts_end, duration, local, phone.get("name", local),
+                           remote, direction, username)
     except Exception as e:
         alog("DB_ERROR", "ERROR",
              operation="insert_call",
@@ -509,8 +567,17 @@ def complete_call(user_phone: str, event_id: int | None = None,
              msg="complete_call: нет pending_call для номера")
 
 
+CARD_LAYOUT_LIMITS = {"columns": (1, 8), "min_height": (0, 800)}
+
+
+def valid_layout_value(key, value):
+    default, maximum = CARD_LAYOUT_LIMITS[key]
+    return type(value) is int and default <= value <= maximum
+
+
 def load_phones() -> None:
     global users_phones
+    seen_ids = set()
 
     # Загружаем телефоны для каждого пользователя из auth.json
     for username in AUTH.keys():
@@ -532,6 +599,7 @@ def load_phones() -> None:
             data = []
 
         loaded = {}
+        migrated = False
         for item in data:
             number = str(item["number"]).strip()
             loaded[number] = {
@@ -545,32 +613,105 @@ def load_phones() -> None:
                 "ping": "?",
                 "position": int(item.get("position", 0)),
             }
+            for key, (default, _) in CARD_LAYOUT_LIMITS.items():
+                value = item.get(key)
+                if valid_layout_value(key, value) and value != default:
+                    loaded[number][key] = value
+            card_id, revision = item.get("card_id"), item.get("revision", 0)
+            if ROLE == "node" and (
+                not isinstance(card_id, str) or not re.fullmatch(r"[0-9a-f]{32}", card_id)
+                or card_id in seen_ids or type(revision) is not int or revision < 0
+            ):
+                card_id, revision = uuid4().hex, 0
+                migrated = True
+            if isinstance(card_id, str):
+                loaded[number].update(card_id=card_id, revision=revision)
+                seen_ids.add(card_id)
         users_phones[username] = loaded
+        if migrated:
+            save_phones(username)
         alog("PHONES_LOADED", user=username, count=len(loaded),
              numbers=list(loaded.keys()))
 
 
+def write_local_json(path, data):
+    if path.resolve().parent != PHONES_DIR.resolve():
+        raise ValueError("Неверный путь файла пользователя.")
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            handle.close()
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_cards(username, phones):
+    rows = []
+    for number, phone in phones.items():
+        row = {"number": number, "name": phone["name"], "ip": phone["ip"],
+               "position": int(phone.get("position", 0))}
+        row.update({key: phone[key] for key in CARD_LAYOUT_LIMITS if key in phone})
+        if "card_id" in phone:
+            row.update(card_id=phone["card_id"], revision=phone["revision"])
+        rows.append(row)
+    rows.sort(key=lambda row: row["position"])
+    write_local_json(PHONES_DIR / f"phones_{username}.json", rows)
+
+
 def save_phones(username: str) -> None:
     with lock:
-        if username not in users_phones:
-            return
-            
-        phones = users_phones[username]
-        arr = []
-        for number, phone in phones.items():
-            arr.append({
-                "number": number,
-                "name": phone["name"],
-                "ip": phone["ip"],
-                "position": int(phone.get("position", 0)),
-            })
+        if username in users_phones:
+            write_cards(username, users_phones[username])
 
-        arr.sort(key=lambda x: x["position"])
-        user_file = PHONES_DIR / f"phones_{username}.json"
-        user_file.write_text(
-            json.dumps(arr, indent=2, ensure_ascii=False),
-            encoding="utf-8"
-        )
+
+def new_card(number, name, ip, position):
+    card = {"name": name or number, "ip": ip, "state": "В_покое", "time": "-", "peer": "",
+            "duration": "00:00", "call_start": None, "ping": "?", "position": position}
+    if ROLE == "node":
+        card.update(card_id=uuid4().hex, revision=0)
+    return card
+
+
+def next_card_position(cards):
+    return max((card["position"] for card in cards.values()), default=-1) + 1
+
+
+def touch_card(card):
+    if "card_id" in card:
+        card["revision"] += 1
+
+
+def change_cards(username, apply):
+    with lock:
+        before = users_phones.get(username, {})
+        cards = {number: phone.copy() for number, phone in before.items()}
+        result = apply(cards)
+        if cards == before:
+            return result
+        numbers = before.keys() | cards.keys()
+        changed_ips = {number for number in numbers
+                       if before.get(number, {}).get("ip") != cards.get(number, {}).get("ip")}
+        previous_conflicts = {number for number in changed_ips if conflicting_number(number)}
+        write_cards(username, cards)
+        users_phones[username] = cards
+        current_conflicts = {number for number in changed_ips if conflicting_number(number)}
+        owners = {username} | owners_of_numbers(previous_conflicts ^ current_conflicts)
+        shared_changed = (
+            any(before.get(number, {}).get("name") != cards.get(number, {}).get("name")
+                for number in numbers) or bool(changed_ips)
+        ) and get_user_meta(username).get("shared", False)
+    broadcast_update(owners)
+    if shared_changed:
+        emit_updates("shared_sets_update", {}, {_library_room})
+    return result
 
 
 def normalize_number(value: str | None) -> str:
@@ -607,25 +748,31 @@ def normalize_call_id(value: str | None) -> str:
     return "" if call_id == "-1" or call_id.startswith("$") else call_id
 
 
-def broadcast_update(event_id: int | None = None):
-    # Вызывается как из request-треда, так и из фонового ping_loop.
-    # start_background_task гарантирует выполнение в eventlet green-thread контексте,
-    # что надёжнее прямого emit из обычного threading.Thread.
-    with _sids_lock:
-        ws_clients = len(connected_sids)
-    alog("BROADCAST_QUEUED", event_id=event_id, ws_clients=ws_clients)
+def owners_of_numbers(numbers):
+    if not numbers:
+        return set()
+    with lock:
+        return {username for username, phones in users_phones.items() if not numbers.isdisjoint(phones)}
 
-    def _emit():
-        try:
-            # event_id в payload позволяет клиенту залогировать его на приём
-            socketio.emit('phones_update',
-                          {'data': 'updated', 'event_id': event_id},
-                          namespace='/')
-            alog("BROADCAST_EMIT", event_id=event_id, ws_clients=ws_clients)
-        except Exception as e:
-            alog("BROADCAST_ERROR", "ERROR", event_id=event_id, error=str(e))
 
-    socketio.start_background_task(_emit)
+def emit_updates(event, payload, rooms):
+    if not rooms:
+        return
+    try:
+        with _emit_lock:
+            for room in rooms:
+                socketio.emit(event, payload, to=room)
+        if event == "phones_update":
+            with _sids_lock:
+                ws_clients = len(connected_sids)
+            alog("BROADCAST_EMIT", event_id=payload["event_id"], ws_clients=ws_clients)
+    except Exception as error:
+        alog("BROADCAST_ERROR", "ERROR", event=event, event_id=payload.get("event_id"), error=str(error))
+
+
+def broadcast_update(usernames, event_id: int | None = None):
+    emit_updates("phones_update", {"data": "updated", "event_id": event_id},
+                 {f"phones:{username}" for username in usernames})
 
 
 # ─── Состояния карточки ──────────────────────────────────────────────────────
@@ -701,8 +848,6 @@ def set_state(number: str, state: str, peer: str | None = None,
              state=state,
              msg="Номер не найден ни у одного пользователя — карточка не обновится")
 
-    broadcast_update(event_id=event_id)
-
 
 def get_sorted_phones(username: str) -> list[dict]:
     with lock:
@@ -714,7 +859,7 @@ def get_sorted_phones(username: str) -> list[dict]:
 
         now = time.time()
         for number, phone in phones.items():
-            entry = {"number": number, **phone}
+            entry = {"number": number, **{k: v for k, v in phone.items() if k not in {"card_id", "revision"}}}
             if phone.get("call_start") is not None:
                 entry["duration_sec"] = int(now - phone["call_start"])
             flags = {} if conflicting_number(number) else phone_flags.get(number, {})
@@ -728,7 +873,7 @@ def get_sorted_phones(username: str) -> list[dict]:
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
     if request.method == "GET":
-        if session.get("logged_in") is True:
+        if authenticated_user():
             return redirect(url_for("panel"))
         return send_file("login.html")
 
@@ -739,6 +884,7 @@ def login_page():
     ip = get_client_ip()
     blocked, seconds_left = is_login_blocked(ip)
     if blocked:
+        journal_record("auth_result", outcome="blocked")
         return jsonify({
             "ok": False,
             "error": f"Слишком много попыток. Повтори через {seconds_left} сек."
@@ -749,10 +895,12 @@ def login_page():
         session["logged_in"] = True
         session["username"] = username
         register_login_success(ip)
+        journal_record("auth_result", outcome="success")
         alog("AUTH_LOGIN_OK", user=username, ip=ip)
         return jsonify({"ok": True})
 
     register_login_fail(ip)
+    journal_record("auth_result", outcome="failed")
     fails = login_attempts.get(ip, {}).get("fails", 1)
     alog("AUTH_LOGIN_FAIL", "WARNING",
          username=username, ip=ip, fails_so_far=fails)
@@ -1141,7 +1289,6 @@ def end_line(number: str, event_id: int, quiet: bool = False,
         # Трубку положили при двух линиях: какая кончилась — не знаем; покой
         # придёт с Terminated / Busy To Idle
         alog("SIP_ONHOOK_IGNORED", event_id=event_id, number=number, reason="multi_line")
-        broadcast_update(event_id=event_id)
     elif line2:
         # Вторая линия так и не ответила — карточка остаётся на первой
         set_state(number, line2["state"], line2["peer"] or None, event_id=event_id)
@@ -1180,8 +1327,6 @@ def end_attempt(number: str, event_id: int, expect: set[str],
             set_state(number, show, event_id=event_id)
         else:
             end_call(number, event_id, quiet=True)
-    else:
-        broadcast_update(event_id=event_id)
 
 
 # ── Обработчики: handler(number, remote, phone_ip, user, event_id) ──
@@ -1203,7 +1348,6 @@ def _ev_incoming(n, remote, ip, user, eid):
         # Второй входящий поверх звонка: карточку не трогаем, иначе после
         # отбоя звонящего watchdog сбросил бы идущий разговор в покой
         alog("SIP_SECOND_LINE", event_id=eid, number=n, remote=remote, direction="in")
-        broadcast_update(event_id=eid)
         return
     set_state(n, "Входящий_вызов", remote, event_id=eid)
 
@@ -1309,7 +1453,6 @@ def _ev_off_hook(n, remote, ip, user, eid):
         # По этому событию нельзя определить текущий аудиоканал или ход звонка.
         alog("SIP_OFFHOOK_IGNORED", event_id=eid, number=n, reason="active_call",
              audio_cleared=audio_cleared)
-        broadcast_update(event_id=eid)
     else:
         set_state(n, "Снята_трубка", event_id=eid)
 
@@ -1321,8 +1464,6 @@ def _ev_idle_to_busy(n, remote, ip, user, eid):
         cur = current_state(n)
     if cur in ("В_покое", "DND"):
         set_state(n, "Занят", event_id=eid)
-    else:
-        broadcast_update(event_id=eid)
 
 
 def _set_state_ev(state, keep_peer=False):
@@ -1345,7 +1486,6 @@ def _flag_ev(name, value):
     def handler(n, remote, ip, user, eid):
         with lock:
             phone_flags.setdefault(n, {})[name] = value
-        broadcast_update(event_id=eid)
     return handler
 
 
@@ -1362,13 +1502,11 @@ def _audio_ev(value):
             # Ответили кнопкой громкой связи / гарнитуры, не снимая трубку:
             # Established на части телефонов при этом не приходит
             _connect(n, remote, user, eid, require_pending=True)
-        else:
-            broadcast_update(event_id=eid)
     return handler
 
 
 def _info_ev(n, remote, ip, user, eid):
-    broadcast_update(event_id=eid)
+    """Информационное событие отражается в журнале и отметке последнего события."""
 
 
 def _dnd_on(n, eid, sticky):
@@ -1377,9 +1515,7 @@ def _dnd_on(n, eid, sticky):
         flags["dnd"] = True
         flags["dnd_sticky"] = sticky
         cur = current_state(n)
-    if cur in ACTIVE_STATES:
-        broadcast_update(event_id=eid)  # во время звонка — только значок
-    else:
+    if cur not in ACTIVE_STATES:  # во время звонка — только значок
         set_state(n, "DND", event_id=eid)
 
 
@@ -1399,8 +1535,6 @@ def _ev_dnd_off(n, remote, ip, user, eid):
         rest = rest_state(n)
     if cur == "DND":
         set_state(n, rest, event_id=eid)
-    else:
-        broadcast_update(event_id=eid)
 
 
 def _reg_ev(value):
@@ -1413,8 +1547,6 @@ def _reg_ev(value):
             set_state(n, rest, event_id=eid)
         elif value != "ok" and cur in ("В_покое", "DND"):
             set_state(n, "Нет_регистрации", event_id=eid)
-        else:
-            broadcast_update(event_id=eid)
     return handler
 
 
@@ -1424,28 +1556,30 @@ def _ev_ip_change(n, remote, ip, user, eid):
     if not ip:
         alog("SIP_IP_CHANGE_NO_IP", "WARNING", event_id=eid, number=n,
              msg="Нет параметра ip=$ip — карточка не обновлена")
-        broadcast_update(event_id=eid)
         return
     with lock:
-        phone = users_phones.get(user, {}).get(n)
+        cards = users_phones.get(user, {})
+        phone = cards.get(n)
         old_ip = phone.get("ip") if phone else None
         changed = phone is not None and old_ip != ip
         if changed:
-            phone["ip"] = ip
+            updated = {**phone, "ip": ip}
+            touch_card(updated)
+            write_cards(user, {**cards, n: updated})
+            cards[n] = updated
     if changed:
-        save_phones(user)
         alog("PHONE_IP_CHANGED", event_id=eid, number=n, user=user,
              old_ip=old_ip, new_ip=ip)
+        if get_user_meta(user).get("shared", False):
+            emit_updates("shared_sets_update", {}, {_library_room})
     elif phone is None:
         alog("SIP_IP_CHANGE_NOT_OWNED", "WARNING", event_id=eid, number=n, user=user,
              msg="Номера нет в наборе владельца токена — IP не обновлён")
-    broadcast_update(event_id=eid)
 
 
 def _ev_vpn_ip(n, remote, ip, user, eid):
     with lock:
         phone_flags.setdefault(n, {})["vpn_ip"] = ip
-    broadcast_update(event_id=eid)
 
 
 INCOMING_ATTEMPT = {"Входящий_вызов"}
@@ -1513,6 +1647,7 @@ def event():
     client_ip = get_client_ip()
 
     if is_event_rate_limited(client_ip):
+        journal_record("sip_rejected", reason="rate_limited")
         alog("SIP_RATE_LIMITED", "WARNING", ip=client_ip)
         return "Too Many Requests", 429
 
@@ -1525,6 +1660,7 @@ def event():
             break
 
     if not target_user:
+        journal_record("sip_rejected", reason="bad_token")
         alog("SIP_BAD_TOKEN", "WARNING", ip=client_ip)
         return "Unauthorized", 401
 
@@ -1581,6 +1717,7 @@ def event():
                 mac_numbers.setdefault((target_user, mac), set()).add(user_phone)
 
         if not user_phone:
+            journal_record("sip_rejected", reason="unknown_phone")
             rejection = "unresolved"
         elif not owned:
             rejection = "not_owned"
@@ -1591,30 +1728,38 @@ def event():
         record_event(key, user_phone, local, resolved_by, remote, phone_ip, call_id,
                      target_user, {**details, "rejection": rejection},
                      update_card=accepted and not ambiguous)
+        owners = set()
 
         if not user_phone:
             alog("SIP_NO_LOCAL", "WARNING", event_id=evt_id, state=state, user=target_user)
-            return "OK"
-        if not owned:
+        elif not owned:
+            journal_record("sip_rejected", reason="unknown_phone")
             alog("SIP_PHONE_NOT_IN_CARDS", "WARNING",
                  event_id=evt_id,
                  number=user_phone,
                  user=target_user,
                  msg="Событие пришло для номера, которого нет в карточках пользователя")
-            return "OK"
-        if not accepted:
+        elif not accepted:
+            journal_record("sip_rejected", reason="unknown_phone")
             alog("SIP_AMBIGUOUS_NUMBER", "WARNING", event_id=evt_id,
                  number=user_phone, user=target_user)
-            return "OK"
+        else:
+            handler = LEGACY_HANDLERS.get(state) or EVENT_HANDLERS.get(key)
+            if handler is None:
+                journal_record("sip_rejected", reason="unsupported_event")
+                alog("SIP_UNKNOWN_STATE", "WARNING",
+                     event_id=evt_id, state=state, number=user_phone, user=target_user)
+            else:
+                handler(user_phone, remote, phone_ip, target_user, evt_id)
+                journal_record("sip_event", event=key, phone_number=user_phone)
+                owners.add(target_user)
+                with lock:
+                    if not ambiguous or not conflicting_number(user_phone):
+                        owners.update(owners_of_numbers({user_phone}))
 
-        handler = LEGACY_HANDLERS.get(state) or EVENT_HANDLERS.get(key)
-        if handler is None:
-            alog("SIP_UNKNOWN_STATE", "WARNING",
-                 event_id=evt_id, state=state, number=user_phone, user=target_user)
-            return "OK"
-
-        handler(user_phone, remote, phone_ip, target_user, evt_id)
-        return "OK"
+    broadcast_update(owners, event_id=evt_id)
+    emit_updates("recent_events_update", {"event_id": evt_id}, {"phones:admin"})
+    return "OK"
 
 
 @app.route("/action_url_events")
@@ -1627,6 +1772,10 @@ def action_url_events():
         return jsonify({"ok": False, "error": "Доступ запрещен"}), 403
     if username not in AUTH:
         return jsonify({"ok": False, "error": "Пользователь не найден"}), 404
+    return jsonify(action_url_catalog(username))
+
+
+def action_url_catalog(username):
     with lock:
         phones = [
             {"number": number, "name": phone.get("name", number),
@@ -1637,7 +1786,7 @@ def action_url_events():
     aliases: dict[str, list[str]] = {}
     for old, new in LEGACY_STATES.items():
         aliases.setdefault(new, []).append(old)
-    return jsonify({
+    return {
         "server_ip": LOCAL_IP,  # если панель открыта как localhost — телефонам нужен LAN-IP
         "phones": phones,
         "events": [
@@ -1645,7 +1794,7 @@ def action_url_events():
              "parameter": ACTION_URL_PARAMETERS[k]}
             for k, ru, en in ACTION_URL_EVENTS
         ],
-    })
+    }
 
 
 _yealink_inspect_lock = threading.Lock()
@@ -1655,13 +1804,16 @@ _yealink_inspect_lock = threading.Lock()
 @login_required
 def inspect_yealink():
     """Сверяем профиль телефона по HTTPS, сохраняя устройство в исходном состоянии."""
-    from yealink_setup import YealinkSetupError, inspect_phone
-
     if session.get("username") != "admin":
         return jsonify(ok=False, code="forbidden", error="Проверка доступна администратору."), 403
     if request.content_length is None or request.content_length > 40_000:
         return jsonify(ok=False, code="payload_size", error="Слишком большой запрос проверки."), 413
-    data = request.get_json(silent=True)
+    return inspect_yealink_data(request.get_json(silent=True))
+
+
+def inspect_yealink_data(data):
+    from yealink_setup import YealinkSetupError, inspect_phone
+
     if not isinstance(data, dict):
         return jsonify(ok=False, code="invalid_request", error="Неверные параметры проверки."), 400
     ip = normalize_ip(data.get("ip")) if isinstance(data.get("ip"), str) else ""
@@ -1680,9 +1832,6 @@ def inspect_yealink():
         for key, value in expected.items()
     ):
         return jsonify(ok=False, code="invalid_profile", error="Неверный профиль Action URL."), 400
-
-    def setting(name):
-        return os.environ[name] if name in os.environ else get_env_value(name)
 
     cidrs = [item.strip() for item in setting("YEALINK_ALLOWED_CIDRS").split(",") if item.strip()]
     username = setting("YEALINK_ADMIN_USER")
@@ -1769,122 +1918,194 @@ def get_phones():
          ip=get_client_ip(),
          count=len(phones),
          ws_clients=ws_clients)
-    return jsonify({"phones": phones})
+    response = jsonify({"phones": phones})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+class CardError(FederationError):
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
+
+
+def card_group(state):
+    if state == "В_покое":
+        return "idle"
+    if not state or state in {"OFFLINE", "DND", "Нет_регистрации"}:
+        return "offline"
+    return "active"
+
+
+def move_card_in_group(cards, data):
+    source = data.get("from_number")
+    target = data.get("to_number")
+    group = data.get("group")
+    if not isinstance(source, str) or not isinstance(target, str) or (
+        group is not None and group not in ("active", "idle", "offline")
+    ):
+        raise CardError("Неверный формат перемещения.")
+    if source not in cards or target not in cards:
+        raise CardError("Карточка была удалена. Попробуйте снова.", 409)
+    source_group = card_group(cards[source].get("state"))
+    target_group = card_group(cards[target].get("state"))
+    if source_group != target_group or (group is not None and source_group != group):
+        raise CardError("Статус карточки изменился. Попробуйте снова.", 409)
+
+    order = sorted(cards, key=lambda number: cards[number]["position"])
+    positions = [cards[number]["position"] for number in order]
+    if len(set(positions)) != len(positions):
+        # Старые наборы могли сохранить одинаковые позиции. Порядок при равенстве
+        # уже определён текущей выдачей, поэтому сначала закрепляем эти места.
+        positions = list(range(len(order)))
+    slots = [index for index, number in enumerate(order)
+             if card_group(cards[number].get("state")) == source_group]
+    group_order = [order[index] for index in slots]
+    target_index = group_order.index(target)
+    group_order.remove(source)
+    group_order.insert(target_index, source)
+    for index, number in zip(slots, group_order):
+        order[index] = number
+    for number, position in zip(order, positions):
+        if cards[number]["position"] != position:
+            cards[number]["position"] = position
+            touch_card(cards[number])
+    return {}
+
+
+def apply_card_change(action, username, data, *, remote=False):
+    def apply(cards):
+        if action == "phone.reorder":
+            if remote:
+                refs = data.get("cards")
+                if not isinstance(refs, list) or len(refs) != len(cards):
+                    raise CardError("Набор карточек изменился.", 409)
+                order = [resolve_card(cards, ref)[0] for ref in refs]
+                if len(set(order)) != len(cards):
+                    raise CardError("Список карточек содержит повторы.")
+            elif isinstance(data, dict):
+                return move_card_in_group(cards, data)
+            elif isinstance(data, list):
+                order = list(map(str, data))
+            else:
+                raise CardError("Неверный формат")
+            for position, number in enumerate(order):
+                if number in cards and cards[number]["position"] != position:
+                    cards[number]["position"] = position
+                    touch_card(cards[number])
+            return {}
+
+        if action == "phone.add":
+            old_number = None
+        elif remote:
+            old_number, _ = resolve_card(cards, data)
+        else:
+            old_number = normalize_number(data.get("old_number") or data.get("number"))
+
+        if action == "phone.delete":
+            if old_number in cards:
+                del cards[old_number]
+                for position, phone in enumerate(sorted(cards.values(), key=lambda p: p["position"])):
+                    if phone["position"] != position:
+                        phone["position"] = position
+                        touch_card(phone)
+            return {}
+
+        number = normalize_number(data.get("number"))
+        name = normalize_number(data.get("name"))
+        ip = normalize_number(data.get("ip"))
+        if not number:
+            raise CardError("Не указан номер" if action == "phone.add" else "Номер не может быть пустым")
+        if remote and (len(number) > 64 or len(name) > 256 or (ip and not normalize_ip(ip))):
+            raise CardError("Некорректные данные карточки.")
+        if number in cards and number != old_number:
+            raise CardError("Такой номер уже существует")
+        if action == "phone.add":
+            card = new_card(number, name, ip, next_card_position(cards))
+        else:
+            if old_number not in cards:
+                raise CardError("Номер не найден", 404)
+            card = cards.pop(old_number)
+            if (old_number, card["name"], card["ip"]) != (number, name or number, ip):
+                touch_card(card)
+            card.update(name=name or number, ip=ip)
+        cards[number] = card
+        return {"id": card.get("card_id"), "revision": card.get("revision")}
+
+    if action != "phone.reorder" and not isinstance(data, dict):
+        raise CardError("Неверный формат")
+    if action == "phone.reorder" and username not in users_phones:
+        raise CardError("Пользователь не найден", 404)
+    return change_cards(username, apply)
+
+
+def resolve_card(cards, ref):
+    if not isinstance(ref, dict) or not isinstance(ref.get("id"), str) or type(ref.get("revision")) is not int:
+        raise CardError("Укажите идентификатор и версию карточки.")
+    for number, card in cards.items():
+        if card.get("card_id") == ref["id"]:
+            if card["revision"] != ref["revision"]:
+                raise CardError("Карточка изменилась на узле. Обновите снимок.", 409)
+            return number, card
+    raise CardError("Карточка удалена на узле.", 409)
+
+
+def edit_local_cards(action):
+    try:
+        apply_card_change(action, session["username"], request.get_json(force=True))
+    except CardError as error:
+        return jsonify(ok=False, error=str(error)), error.status
+    return jsonify(ok=True)
 
 
 @app.route("/add_phone", methods=["POST"])
 @login_required
 def add_phone():
-    username = session.get("username")
-    data = request.get_json(force=True)
-
-    number = normalize_number(data.get("number"))
-    name = normalize_number(data.get("name"))
-    ip = normalize_number(data.get("ip"))
-
-    if not number:
-        return jsonify({"ok": False, "error": "Не указан номер"}), 400
-
-    with lock:
-        if username not in users_phones:
-            users_phones[username] = {}
-            
-        if number in users_phones[username]:
-            return jsonify({"ok": False, "error": "Такой номер уже существует"}), 400
-
-        next_position = len(users_phones[username])
-        users_phones[username][number] = {
-            "name": name or number,
-            "ip": ip,
-            "state": "В_покое",
-            "time": "-",
-            "peer": "",
-            "duration": "00:00",
-            "call_start": None,
-            "ping": "?",
-            "position": next_position,
-        }
-
-    save_phones(username)
-    broadcast_update()
-    return jsonify({"ok": True})
+    return edit_local_cards("phone.add")
 
 
 @app.route("/update_phone", methods=["POST"])
 @login_required
 def update_phone():
-    username = session.get("username")
-    data = request.get_json(force=True)
-
-    old_number = normalize_number(data.get("old_number") or data.get("number"))
-    new_number = normalize_number(data.get("number"))
-    name = normalize_number(data.get("name"))
-    ip = normalize_number(data.get("ip"))
-
-    if not new_number:
-        return jsonify({"ok": False, "error": "Номер не может быть пустым"}), 400
-
-    with lock:
-        if username not in users_phones or old_number not in users_phones[username]:
-            return jsonify({"ok": False, "error": "Номер не найден"}), 404
-
-        if new_number != old_number and new_number in users_phones[username]:
-            return jsonify({"ok": False, "error": "Такой номер уже существует"}), 400
-
-        phone = users_phones[username].pop(old_number)
-        phone["name"] = name or new_number
-        phone["ip"] = ip
-        users_phones[username][new_number] = phone
-
-    save_phones(username)
-    broadcast_update()
-    return jsonify({"ok": True})
+    return edit_local_cards("phone.update")
 
 
 @app.route("/delete_phone", methods=["POST"])
 @login_required
 def delete_phone():
-    username = session.get("username")
-    data = request.get_json(force=True)
-    number = normalize_number(data.get("number"))
+    return edit_local_cards("phone.delete")
 
-    with lock:
-        if username in users_phones and number in users_phones[username]:
-            del users_phones[username][number]
 
-            ordered_numbers = sorted(
-                users_phones[username].keys(),
-                key=lambda n: int(users_phones[username][n]["position"])
-            )
-            for idx, num in enumerate(ordered_numbers):
-                users_phones[username][num]["position"] = idx
+@app.route("/resize_phone", methods=["POST"])
+@login_required
+def resize_phone():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("number"), str) or not all(
+        valid_layout_value(key, data.get(key)) for key in CARD_LAYOUT_LIMITS
+    ):
+        return jsonify(ok=False, error="Неверные размеры карточки."), 400
+    number = normalize_number(data["number"])
 
-    save_phones(username)
-    broadcast_update()
-    return jsonify({"ok": True})
+    def resize(cards):
+        if number not in cards:
+            raise CardError("Номер не найден", 404)
+        for key, (default, _) in CARD_LAYOUT_LIMITS.items():
+            if data[key] == default:
+                cards[number].pop(key, None)
+            else:
+                cards[number][key] = data[key]
+
+    try:
+        change_cards(session["username"], resize)
+    except CardError as error:
+        return jsonify(ok=False, error=str(error)), error.status
+    return jsonify(ok=True)
 
 
 @app.route("/reorder", methods=["POST"])
 @login_required
 def reorder():
-    username = session.get("username")
-    order = request.get_json(force=True)
-
-    if not isinstance(order, list):
-        return jsonify({"ok": False, "error": "Неверный формат"}), 400
-
-    with lock:
-        if username not in users_phones:
-            return jsonify({"ok": False, "error": "Пользователь не найден"}), 404
-            
-        for idx, number in enumerate(order):
-            number = str(number)
-            if number in users_phones[username]:
-                users_phones[username][number]["position"] = idx
-
-    save_phones(username)
-    broadcast_update()
-    return jsonify({"ok": True})
+    return edit_local_cards("phone.reorder")
 
 
 @app.route("/")
@@ -1897,7 +2118,7 @@ def panel():
 
 @app.route("/favicon.ico")
 def favicon():
-    return "OK", 200, {"Content-Type": "image/x-icon"}
+    return redirect(url_for("static", filename="monitor.svg"), code=302)
 
 
 @app.route("/user_info")
@@ -1907,13 +2128,9 @@ def user_info():
     return jsonify({
         "username": username,
         "event_token": AUTH[username].get("event_token"),
-        "is_admin": username == "admin"
+        "is_admin": username == "admin",
+        "server_role": ROLE,
     })
-
-
-@app.route("/static/<path:filename>")
-def static_files(filename):
-    return send_file(Path("static") / filename)
 
 
 @app.route("/admin/users")
@@ -1947,7 +2164,7 @@ def get_user_meta(username: str) -> dict:
 
 def save_user_meta(username: str, meta: dict) -> None:
     meta_file = PHONES_DIR / f"meta_{username}.json"
-    meta_file.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_local_json(meta_file, meta)
 
 
 @app.route("/my_shared_status")
@@ -1980,66 +2197,55 @@ def shared_sets():
     return jsonify({"ok": True, "sets": result})
 
 
+def set_shared_status(username, shared=None):
+    with lock:
+        meta = get_user_meta(username)
+        previous = meta.get("shared", False)
+        meta["shared"] = not previous if shared is None else shared
+        if meta["shared"] == previous:
+            return previous
+        save_user_meta(username, meta)
+    emit_updates("shared_sets_update", {}, {_library_room})
+    return meta["shared"]
+
+
 @app.route("/toggle_shared", methods=["POST"])
 @login_required
 def toggle_shared():
-    username = session.get("username")
-    meta = get_user_meta(username)
-    meta["shared"] = not meta.get("shared", False)
-    save_user_meta(username, meta)
-    return jsonify({"ok": True, "shared": meta["shared"]})
+    return jsonify(ok=True, shared=set_shared_status(session["username"]))
+
+
+def import_shared_cards(current_user, source):
+    if not source or source not in AUTH:
+        raise CardError("Пользователь не найден", 404)
+    if source == current_user:
+        raise CardError("Нельзя импортировать свой набор")
+
+    def apply(target):
+        if not get_user_meta(source).get("shared"):
+            raise CardError("Набор не является общим", 403)
+        imported = skipped = 0
+        position = next_card_position(target)
+        for number, phone in users_phones.get(source, {}).items():
+            if number in target:
+                skipped += 1
+                continue
+            target[number] = new_card(number, phone["name"], phone["ip"], position + imported)
+            imported += 1
+        return {"imported": imported, "skipped": skipped}
+
+    return change_cards(current_user, apply)
 
 
 @app.route("/import_set", methods=["POST"])
 @login_required
 def import_set():
-    current_user = session.get("username")
     data = request.get_json(silent=True) or {}
     source = str(data.get("username", "")).strip()
-
-    if not source or source not in AUTH:
-        return jsonify({"ok": False, "error": "Пользователь не найден"}), 404
-
-    if source == current_user:
-        return jsonify({"ok": False, "error": "Нельзя импортировать свой набор"}), 400
-
-    meta = get_user_meta(source)
-    if not meta.get("shared"):
-        return jsonify({"ok": False, "error": "Набор не является общим"}), 403
-
-    imported = 0
-    skipped = 0
-
-    with lock:
-        source_phones = users_phones.get(source, {})
-        if current_user not in users_phones:
-            users_phones[current_user] = {}
-        target = users_phones[current_user]
-        next_pos = len(target)
-
-        for number, phone in source_phones.items():
-            if number in target:
-                skipped += 1
-                continue
-            target[number] = {
-                "name": phone["name"],
-                "ip": phone["ip"],
-                "state": "В_покое",
-                "time": "-",
-                "peer": "",
-                "duration": "00:00",
-                "call_start": None,
-                "ping": "?",
-                "position": next_pos,
-            }
-            next_pos += 1
-            imported += 1
-
-    if imported:
-        save_phones(current_user)
-        broadcast_update()
-
-    return jsonify({"ok": True, "imported": imported, "skipped": skipped})
+    try:
+        return jsonify(ok=True, **import_shared_cards(session["username"], source))
+    except CardError as error:
+        return jsonify(ok=False, error=str(error)), error.status
 
 
 @app.route("/history")
@@ -2068,6 +2274,8 @@ def get_history():
         placeholders = ",".join("?" * len(user_numbers))
         conditions.append(f"local IN ({placeholders})")
         params.extend(user_numbers)
+        conditions.append("username = ?")
+        params.append(username)
     else:
         if user_filter:
             conditions.append("username = ?")
@@ -2167,7 +2375,8 @@ def expire_stuck_calls(now: float | None = None) -> bool:
             else:
                 del closed_call_ids[key]
 
-    changed = False
+    owners = set()
+    shared_numbers = set()
     for number in candidates:
         with number_lock(number), lock:
             call = _pending_call(number, now)
@@ -2187,8 +2396,64 @@ def expire_stuck_calls(now: float | None = None) -> bool:
                 flags.pop("line2", None)
                 flags["lines"] = 0
                 phone.update(state=rest, call_start=None, peer="", duration="00:00")
-                changed = True
-    return changed
+                owners.add(username)
+                if not conflicting_number(number):
+                    shared_numbers.add(number)
+    broadcast_update(owners | owners_of_numbers(shared_numbers))
+    return bool(owners)
+
+
+def apply_ping_result(username, number, ip_addr, latency):
+    with lock:
+        phone = users_phones.get(username, {}).get(number)
+        if phone is None or phone.get("ip", "").strip() != ip_addr:
+            return False
+
+        old_ping = phone.get("ping")
+        old_state = phone.get("state")
+        if latency is None:
+            phone["ping_fail_count"] = phone.get("ping_fail_count", 0) + 1
+            phone["ping_ok_count"] = 0
+            # Порог для индикации ping и для перехода в OFFLINE различается.
+            if phone["ping_fail_count"] >= 2:
+                phone["ping"] = "Недоступен"
+            if phone["ping_fail_count"] >= 3 and old_state != "OFFLINE":
+                journal_record("phone_reachability", phone_number=number, status="offline")
+                alog("PING_OFFLINE", number=number, user=username, ip=ip_addr,
+                     fail_count=phone["ping_fail_count"], prev_state=old_state)
+                phone.update(state="OFFLINE", call_start=None, duration="00:00")
+        else:
+            phone["ping_fail_count"] = 0
+            phone["ping_ok_count"] = phone.get("ping_ok_count", 0) + 1
+            phone["ping"] = f"{latency} ms"
+            if old_state == "OFFLINE" and phone["ping_ok_count"] >= 2:
+                journal_record("phone_reachability", phone_number=number, status="online")
+                alog("PING_RECOVERED", number=number, user=username, ip=ip_addr, latency_ms=latency)
+                phone["state"] = "В_покое"
+
+        ping_changed = phone.get("ping") != old_ping
+        if ping_changed:
+            alog("PING_CHANGE", number=number, user=username, old_ping=old_ping, new_ping=phone["ping"])
+        return ping_changed or phone.get("state") != old_state
+
+
+def flush_ping_updates():
+    # Объединяем ответы пингов, пришедшие почти одновременно, без ожидания полного обхода.
+    socketio.sleep(0.25)
+    with _ping_update_lock:
+        owners = _ping_update_users.copy()
+        _ping_update_users.clear()
+    broadcast_update(owners)
+
+
+def ping_card(username, number, ip_addr):
+    if not apply_ping_result(username, number, ip_addr, ping_once(ip_addr)):
+        return
+    with _ping_update_lock:
+        start_flush = not _ping_update_users
+        _ping_update_users.add(username)
+    if start_flush:
+        socketio.start_background_task(flush_ping_updates)
 
 
 def ping_loop() -> None:
@@ -2198,7 +2463,7 @@ def ping_loop() -> None:
     
     while True:
         snapshot = []
-        any_changed = expire_stuck_calls()
+        expire_stuck_calls()
         
         with lock:
             for username, phones in users_phones.items():
@@ -2207,49 +2472,6 @@ def ping_loop() -> None:
                     if ip_addr:
                         snapshot.append((username, number, ip_addr))
 
-        def task(uname, num, ip_addr):
-            latency = ping_once(ip_addr)
-            with lock:
-                if uname not in users_phones or num not in users_phones[uname]:
-                    return False
-                
-                phone = users_phones[uname][num]
-                old_ping = phone.get("ping")
-                old_state = phone.get("state")
-
-                if latency is None:
-                    phone["ping_fail_count"] = phone.get("ping_fail_count", 0) + 1
-                    phone["ping_ok_count"] = 0
-                    # Показываем "Недоступен" только после 2 подряд неудач (~20с),
-                    # чтобы убрать мигания при кратковременных потерях пакетов
-                    if phone["ping_fail_count"] >= 2:
-                        phone["ping"] = "Недоступен"
-                    if phone["ping_fail_count"] >= 3 and old_state != "OFFLINE":
-                        alog("PING_OFFLINE",
-                             number=num, user=uname, ip=ip_addr,
-                             fail_count=phone["ping_fail_count"],
-                             prev_state=old_state)
-                        phone["state"] = "OFFLINE"
-                        phone["call_start"] = None
-                        phone["duration"] = "00:00"
-                else:
-                    phone["ping_fail_count"] = 0
-                    phone["ping_ok_count"] = phone.get("ping_ok_count", 0) + 1
-                    phone["ping"] = f"{latency} ms"
-                    # Восстанавливаем из OFFLINE только после 2 подряд успехов (~20с),
-                    # чтобы не прыгать обратно при случайном единичном пакете
-                    if phone["state"] == "OFFLINE" and phone["ping_ok_count"] >= 2:
-                        alog("PING_RECOVERED",
-                             number=num, user=uname, ip=ip_addr, latency_ms=latency)
-                        phone["state"] = "В_покое"
-
-                changed = phone.get("ping") != old_ping or phone.get("state") != old_state
-                if changed and phone.get("ping") != old_ping:
-                    alog("PING_CHANGE",
-                         number=num, user=uname,
-                         old_ping=old_ping, new_ping=phone["ping"])
-                return changed
-
         if snapshot:
             # Распределяем запуск процессов во времени (shaping), чтобы избежать пиков CPU.
             # Для 2000 телефонов размазываем запуск пачки на ~10 секунд.
@@ -2257,34 +2479,225 @@ def ping_loop() -> None:
             delay = 10.0 / len(snapshot) if len(snapshot) > 50 else 0
             
             for p in snapshot:
-                futures.append(executor.submit(task, *p))
+                futures.append(executor.submit(ping_card, *p))
                 if delay > 0:
                     time.sleep(delay)
             
-            # Собираем результаты и проверяем наличие изменений
             for f in futures:
                 try:
-                    if f.result():
-                        any_changed = True
+                    f.result()
                 except Exception:
                     pass
-
-        if any_changed:
-            broadcast_update()
 
         # Пауза перед следующим полным циклом мониторинга
         time.sleep(10)
 
 
 
-if __name__ == "__main__":
-    alog("APP_START", version=VERSION,
-         log_file=str(LOG_FILE),
-         db_file=str(DB_FILE),
-         target_ip=TARGET_IP or None)  # None = дублирование выключено
+def federation_admin():
+    return authenticated_user() == "admin"
+
+
+def federation_snapshot():
+    with lock:
+        phones = []
+        for owner, cards in users_phones.items():
+            for number, card in cards.items():
+                flags = {} if conflicting_number(number) else phone_flags.get(number, {})
+                phones.append({
+                    "id": card["card_id"], "revision": card["revision"], "owner": owner, "number": number,
+                    **{key: card.get(key) for key in ("name", "ip", "state", "peer", "call_start",
+                                                     "position", "ping")},
+                    "flags": {key: flags[key] for key in PUBLIC_FLAGS if key in flags},
+                })
+        return {
+            "phones": phones,
+            "users": [{"username": owner, "shared": get_user_meta(owner).get("shared", False)} for owner in AUTH],
+            "recent_events": [
+                {field: entry[field] for field in ("time", "label", "number", "user", "rejection") if field in entry}
+                for entry in reversed(list(recent_events)[-100:]) if entry["known"]
+            ],
+        }
+
+
+def find_federation_card(ref):
+    card_id = ref.get("id")
+    if not isinstance(card_id, str):
+        raise CardError("Укажите идентификатор карточки.")
+    with lock:
+        for owner, cards in users_phones.items():
+            if any(card.get("card_id") == card_id for card in cards.values()):
+                number, card = resolve_card(cards, ref)
+                return owner, number, card.copy()
+    raise CardError("Карточка удалена на узле.", 409)
+
+
+def execute_federation_command(command, link):
+    action, data = command["action"], command["payload"]
+    if action == "logs.read":
+        if journal is None:
+            return "failed", {"error": "Журнал на узле недоступен."}
+        try:
+            return "applied", journal.read(limit=data.get("limit", 100), before=data.get("before"))
+        except JournalError as error:
+            return "failed", {"error": str(error)}
+    if action == "update.install":
+        from federation_updates import UpdateDownloadError, UpdateError, execute_update
+        from release_install import managed, update_public_key
+
+        public_key = update_public_key(Path(__file__).resolve().parent, Path.cwd())
+        if not public_key:
+            raise FederationError("На узле не настроен ключ проверки обновлений.")
+        try:
+            result = execute_update(
+                command, {**link, "token": link["node_token"]}, PHONES_DIR,
+                public_key=public_key, executable=setting("FEDERATION_UPDATE_EXECUTOR") or None,
+                opener=make_opener(link["tls_ca"]).open,
+                managed_role=ROLE if managed() else None,
+            )
+        except UpdateDownloadError:
+            return "running", {"error": "Загрузка прервана. Узел повторит запрос."}
+        except UpdateError as error:
+            return "failed", {"code": error.code, "error": str(error)}
+        return result.pop("status"), result
+
+    try:
+        if action in {"phone.update", "phone.delete", "yealink.inspect"}:
+            owner, number, card = find_federation_card(data)
+        else:
+            owner = data.get("owner")
+            if not isinstance(owner, str) or owner not in AUTH:
+                raise CardError("Пользователь не найден", 404)
+        if action in {"phone.add", "phone.update", "phone.delete", "phone.reorder"}:
+            return "applied", apply_card_change(action, owner, data, remote=True)
+        if action == "set.toggle_shared":
+            shared = data.get("shared")
+            if type(shared) is not bool:
+                raise CardError("Укажите состояние доступа к набору.")
+            return "applied", {"shared": set_shared_status(owner, shared)}
+        if action == "set.import":
+            if not isinstance(data.get("source"), str):
+                raise CardError("Укажите источник набора.")
+            return "applied", import_shared_cards(owner, data["source"])
+        if action == "action_url.events":
+            return "applied", action_url_catalog(owner)
+        if action == "yealink.inspect":
+            with app.app_context():
+                response = app.make_response(inspect_yealink_data({
+                    "username": owner, "number": number, "ip": card["ip"],
+                }))
+                return ("applied" if response.status_code < 400 else "failed"), response.get_json()
+        raise CardError("Неизвестная команда сервера.")
+    except CardError as error:
+        return ("conflict" if error.status == 409 else "failed"), {"error": str(error)}
+
+
+node_sync = None
+if ROLE == "node":
+    poll_seconds = int(setting("FEDERATION_POLL_SECONDS", "5"))
+    if not 1 <= poll_seconds <= 30:
+        raise ValueError("FEDERATION_POLL_SECONDS должен быть от 1 до 30.")
+    master_ip = setting("FEDERATION_MASTER_IP").strip()
+    master_url = None
+    if master_ip:
+        address = ipaddress.ip_address(master_ip)
+        host = str(address) if address.version == 4 else f"[{address}]"
+        port = int(setting("FEDERATION_MASTER_PORT", "443"))
+        if not 1 <= port <= 65535:
+            raise ValueError("Неверный FEDERATION_MASTER_PORT.")
+        master_url = f"https://{host}:{port}" if port != 443 else f"https://{host}"
+    node_sync = NodeSync(DB_FILE, VERSION, federation_snapshot, execute_federation_command,
+                         interval=poll_seconds, master_url=master_url,
+                         on_connection=lambda outcome: journal_record("federation_status", outcome=outcome))
+
+
+@app.route("/federation")
+@app.route("/node-link")
+@login_required
+def federation_panel():
+    if ROLE == "standalone":
+        return jsonify(ok=False, error="Подключение доступно на узле."), 404
+    if not federation_admin():
+        return jsonify(ok=False, error="Доступ запрещён."), 403
+    response = send_file("node_link.html")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/federation/v1/node/link", methods=["GET", "POST"])
+@app.route("/api/federation/v1/node/address", methods=["POST"])
+def federation_node_settings():
+    if node_sync is None:
+        return jsonify(ok=False, error="Доступно на узле."), 404
+    if not federation_admin():
+        return jsonify(ok=False, error="Доступ запрещён."), 403
+    if request.method == "GET":
+        return jsonify(node_sync.status())
+    if request.headers.get("Origin", request.host_url.rstrip("/")) != request.host_url.rstrip("/"):
+        return jsonify(ok=False, error="Запрос с другого сайта."), 403
+    if request.content_length is None or request.content_length > 150000:
+        return jsonify(ok=False, error="Слишком большой запрос."), 413
+    data = request.get_json(silent=True)
+    try:
+        if request.path.endswith("/address"):
+            if not isinstance(data, dict):
+                raise FederationError("Неверный формат адреса.")
+            node_sync.change_address(data.get("url"), data.get("tls_ca"))
+        else:
+            node_sync.import_invitation(data)
+    except FederationError as error:
+        return jsonify(ok=False, error=str(error)), 400
+    return jsonify(node_sync.status())
+
+
+@app.route("/api/federation/v1/node/update", methods=["GET", "POST"])
+def federation_node_update():
+    if node_sync is None:
+        return jsonify(ok=False, error="Доступно на узле."), 404
+    if not federation_admin():
+        return jsonify(ok=False, error="Доступ запрещён."), 403
+    from release_install import managed, update_public_key
+
+    enabled = managed() and bool(update_public_key(Path(__file__).resolve().parent, Path.cwd()))
+    if request.method == "POST":
+        if not enabled:
+            return jsonify(ok=False, error="Автоматическая установка не настроена."), 409
+        if request.content_length is None or request.content_length > 1024:
+            return jsonify(ok=False, error="Неверный запрос."), 400
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify(ok=False, error="Неверный запрос."), 400
+        try:
+            node_sync.request_update(data.get("package_id"))
+        except FederationError as error:
+            return jsonify(ok=False, error=str(error)), 409
+    response = jsonify(ok=True, enabled=enabled, **node_sync.update_status())
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def main():
+    alog("APP_START", version=VERSION, role=ROLE, log_file=str(LOG_FILE), db_file=str(DB_FILE),
+         target_ip=(TARGET_IP or None) if ROLE == "standalone" else None)
     load_phones()
     init_db()
-    threading.Thread(target=ping_loop,     daemon=True).start()
-    threading.Thread(target=cleanup_loop,  daemon=True).start()
-    alog("APP_READY", host="0.0.0.0", port=8000)
-    socketio.run(app, host="0.0.0.0", port=8000, debug=False, allow_unsafe_werkzeug=True)
+    threading.Thread(target=ping_loop, daemon=True).start()
+    threading.Thread(target=cleanup_loop, daemon=True).start()
+    if node_sync:
+        node_sync.import_at_startup(setting("FEDERATION_INVITATION"))
+        node_sync.start()
+    journal_record("service_started")
+    alog("APP_READY", host=LISTEN_HOST, port=LISTEN_PORT, role=ROLE)
+    if os.environ.get("INEI_UPDATE_READY"):
+        from release_install import mark_ready
+        from werkzeug.serving import make_server
+
+        listener = make_server(LISTEN_HOST, LISTEN_PORT, app, threaded=True)
+        mark_ready(VERSION, ROLE)
+        listener.serve_forever()
+        return
+    socketio.run(app, host=LISTEN_HOST, port=LISTEN_PORT, debug=False, allow_unsafe_werkzeug=True)
+
+
+if __name__ == "__main__":
+    main()

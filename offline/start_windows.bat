@@ -12,14 +12,15 @@ if not defined PY call :try python
 if not defined PY call :try python3
 if not defined PY goto nopython
 
-echo Starting Monitoring SIP on port 8000 ...
+echo Starting Monitoring SIP ...
 echo Stop: Ctrl+C or close this window.
 echo.
-%PY% "%~dp0run.py"
+%PY% "%~dp0run.py" %*
+set "RESULT=%errorlevel%"
 echo.
-echo Server stopped (exit code %errorlevel%).
-pause
-exit /b
+echo Server stopped (exit code %RESULT%).
+if "%~1"=="" pause
+exit /b %RESULT%
 
 :try
 %* -c "import sys; sys.exit(sys.version_info < (3, 10))" >nul 2>&1 && set "PY=%*"

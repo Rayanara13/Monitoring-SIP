@@ -22,6 +22,7 @@ class PhoneLab:
         self._events = deque(maxlen=300)
         self._sequence = 0
         self._pairs = {}
+        self._manual_phones = set()
         self._phones = self._initial_phones()
 
     def _initial_phones(self):
@@ -74,14 +75,28 @@ class PhoneLab:
         if not phone["power"]:
             raise ValueError("Телефон выключен.")
 
-    def _emit(self, phone, key, remote=None, call_id=None):
+    def _emit(self, phone, key, remote=None, call_id=None, *, manual=False):
         remote = phone["peer"] if remote is None else str(remote)
         call_id = phone["call_id"] if call_id is None else str(call_id)
         self._send_event(dict(phone), key, remote, call_id)
-        self._events.append({
+        event = {
             "at": self._clock() + self._wall_offset, "phone": phone["number"], "state": key,
             "remote": remote, "call_id": call_id,
-        })
+        }
+        if manual:
+            event["source"] = "manual"
+        self._events.append(event)
+
+    def send_single_event(self, number, key, remote=""):
+        """Отправить проверенный API ключ без изменения модели звонка."""
+        with self._lock:
+            phone = self._phone(number)
+            if remote and (remote not in self.NUMBERS or remote == phone["number"]):
+                raise ValueError("Выберите другой виртуальный телефон.")
+            if self._pairs:
+                raise ValueError("Завершите звонок на виртуальных телефонах.")
+            self._manual_phones.add(phone["number"])
+            self._emit(phone, key, remote, "", manual=True)
 
     def _rest(self, phone):
         self._pairs.pop(phone["number"], None)
@@ -327,4 +342,10 @@ class PhoneLab:
             for phone in self._phones.values():
                 for key in ("setup_completed", "registered", "dnd_off", "always_fwd_off", "unmute", "busy_to_idle"):
                     self._emit(phone, key, "", "")
+                if phone["number"] in self._manual_phones:
+                    for key in ("busy_fwd_off", "no_answer_fwd_off", "call_waiting_off",
+                                "view_missed_call", "view_forwarded_call"):
+                        self._emit(phone, key, "", "")
+                    self._emit({**phone, "ip": ""}, "vpn_ip", "", "")
+                    self._manual_phones.discard(phone["number"])
             return self.state()

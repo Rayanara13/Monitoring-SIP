@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Иней">
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="#101d33" stroke="#3b82f6"/>
+  <g fill="none" stroke="#9dc3ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M16 6.5v19M7.77 11.25l16.46 9.5M7.77 20.75l16.46-9.5"/>
+    <path d="m13.2 8.3 2.8 2.8 2.8-2.8m-5.6 15.4 2.8-2.8 2.8 2.8"/>
+    <path d="m8.05 14.6 3.8-1.02-1.02-3.8m13.12 7.62-3.8 1.02 1.02 3.8"/>
+    <path d="m10.83 22.22 1.02-3.8-3.8-1.02m13.12-7.62-1.02 3.8 3.8 1.02"/>
+  </g>
+</svg>

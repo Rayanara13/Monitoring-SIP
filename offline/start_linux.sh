@@ -12,7 +12,8 @@ chmod +x "$BUNDLED" 2>/dev/null
 works() { "$1" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; }
 
 PY=""
-for cand in ${PYTHON:-} "$BUNDLED" python3 python; do
+for cand in "${PYTHON:-}" "$BUNDLED" python3 python; do
+    if [ -z "$cand" ]; then continue; fi
     if works "$cand"; then PY="$cand"; break; fi
 done
 
@@ -23,5 +24,5 @@ if [ -z "$PY" ]; then
     exit 1
 fi
 
-echo "Запуск Monitoring SIP на порту 8000 … Остановка: Ctrl+C."
-exec "$PY" run.py
+echo "Запуск Инея … Остановка: Ctrl+C."
+exec "$PY" run.py "$@"

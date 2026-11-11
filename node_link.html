@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/static/monitor.svg">
+<title>Подключение узла · Иней by Стёпчик</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font: 15px/1.5 system-ui, sans-serif;
+    background: #07101b;
+    color: #edf4fd;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; }
+  header { border-bottom: 1px solid #2b3c51; background: #101c2b; }
+  header > div, main { max-width: 990px; margin: auto; padding: 16px 20px; }
+  header > div, .row, .brand { display: flex; align-items: center; gap: 12px; }
+  header > div, .row { justify-content: space-between; flex-wrap: wrap; }
+  h1, h2, p, dl { margin: 0; }
+  h1 { font-size: 1.45rem; }
+  h2 { font-size: 1.1rem; }
+  .brand strong { font-size: 1.18rem; }
+  .brand span, dt { color: #aebed1; }
+  .stack { display: grid; gap: 14px; }
+  .columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .card { padding: 16px; background: #101c2b; border: 1px solid #2b3c51; border-radius: 12px; }
+  dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  label { display: grid; gap: 5px; }
+  a, button, input { font: inherit; color: inherit; }
+  a, button, input {
+    display: inline-block;
+    border: 1px solid #2b3c51;
+    border-radius: 7px;
+    background: #152438;
+    padding: 7px 10px;
+  }
+  a, button { text-decoration: none; cursor: pointer; }
+  a:hover, button:hover { border-color: #92bbff; }
+  a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid #92bbff; outline-offset: 2px; }
+  button:disabled { opacity: .55; cursor: default; }
+  input { min-width: 0; width: 100%; }
+  .status { font-weight: 650; color: #ffd28a; }
+  .status.good, .success { color: #7de0bc; }
+  .error { color: #ffb6b6; }
+  @media (max-width: 600px) {
+    header > div, main { padding: 12px; }
+    .columns { grid-template-columns: minmax(0, 1fr); }
+    dl { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+    dd { margin-bottom: 6px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="brand"><img src="/static/monitor.svg" width="32" height="32" alt="">
+      <div><strong>Иней</strong><br><span>by Стёпчик</span></div>
+    </div>
+    <a href="/">Локальная панель</a>
+  </div>
+</header>
+<main class="stack">
+  <p id="notice" class="card" role="status" aria-live="polite" hidden></p>
+  <section class="card stack">
+    <div class="row"><h1>Подключение узла</h1><span id="status" class="status">Загрузка…</span></div>
+    <dl>
+      <dt>ID узла</dt><dd id="node-id">—</dd>
+      <dt>Адрес</dt><dd id="address">—</dd>
+      <dt>Резервный адрес</dt><dd id="fallback">—</dd>
+      <dt>Последний обмен</dt><dd id="last-sync">—</dd>
+      <dt>В очереди истории</dt><dd id="queue">—</dd>
+    </dl>
+    <p id="sync-error" class="status" hidden></p>
+  </section>
+  <div class="columns">
+    <form id="import" class="card stack">
+      <h2>Файл подключения</h2>
+      <label>Выберите приглашение<input type="file" name="invitation" accept=".json,application/json" required></label>
+      <div><button type="submit">Подключить узел</button></div>
+    </form>
+    <form id="change" class="card stack">
+      <h2>Сменить адрес</h2>
+      <label>HTTPS-адрес<input type="url" name="url" list="known-addresses" maxlength="512" required></label>
+      <datalist id="known-addresses"></datalist>
+      <div><button type="submit" disabled>Проверить и сохранить</button></div>
+    </form>
+  </div>
+</main>
+<script>
+'use strict';
+
+const el = id => document.getElementById(id);
+const apiRoot = '/api/federation/v1/node';
+const timeFormat = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'medium' });
+let busy = false;
+let refreshing = false;
+
+async function request(path, body) {
+  const options = { cache: 'no-store', credentials: 'same-origin', headers: { Accept: 'application/json' } };
+  if (body !== undefined) {
+    options.method = 'POST';
+    options.headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(apiRoot + path, options);
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data || data.ok === false) {
+    throw new Error(data?.error || 'Запрос не выполнен (HTTP ' + response.status + ').');
+  }
+  return data;
+}
+
+function notice(text, className = '') {
+  const box = el('notice');
+  box.textContent = text;
+  box.className = 'card ' + className;
+  box.hidden = !text;
+}
+
+function render(data) {
+  const connected = data.enrolled && data.last_sync && !data.error && Date.now() / 1000 - data.last_sync < 60;
+  el('status').textContent = !data.configured ? 'Подключение не настроено' : data.error ? 'Сбой обмена' :
+    connected ? 'Подключён' : data.last_sync ? 'Нет свежего обмена' : 'Ожидает обмена';
+  el('status').className = connected ? 'status good' : 'status';
+  el('node-id').textContent = data.node_id || '—';
+  el('address').textContent = data.url || '—';
+  el('fallback').textContent = data.fallback_url || '—';
+  const last = new Date(Number(data.last_sync) * 1000);
+  el('last-sync').textContent = data.last_sync && Number.isFinite(last.getTime()) ? timeFormat.format(last) : '—';
+  el('queue').textContent = data.history_queued ?? '—';
+  el('sync-error').textContent = data.error || '';
+  el('sync-error').hidden = !data.error;
+  el('change').querySelector('button').disabled = !data.configured;
+  el('known-addresses').replaceChildren(...[...new Set([data.url, data.fallback_url].filter(Boolean))]
+    .map(address => new Option(address, address)));
+}
+
+async function refresh() {
+  if (busy || refreshing) return;
+  refreshing = true;
+  try {
+    const data = await request('/link');
+    if (!busy) render(data);
+  } catch (error) {
+    if (!busy) notice(error.message, 'error');
+  } finally {
+    refreshing = false;
+  }
+}
+
+function onSubmit(id, action, success) {
+  const form = el(id);
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (busy) return;
+    busy = true;
+    const button = form.querySelector('button');
+    button.disabled = true;
+    try {
+      const data = await action(new FormData(form));
+      form.reset();
+      render(data);
+      notice(success, 'success');
+    } catch (error) {
+      notice(error.message, 'error');
+    } finally {
+      busy = false;
+      button.disabled = false;
+    }
+  });
+}
+
+onSubmit('import', async values => {
+  const file = values.get('invitation');
+  if (!file || file.size > 131072) throw new Error('Выберите JSON-файл подключения.');
+  let invitation;
+  try { invitation = JSON.parse(await file.text()); }
+  catch { throw new Error('Файл подключения не содержит корректный JSON.'); }
+  return request('/link', invitation);
+}, 'Файл принят. Узел начнёт подключение.');
+
+onSubmit('change', values => request('/address', { url: values.get('url') }), 'Адрес сохранён.');
+
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+</script>
+</body>
+</html>

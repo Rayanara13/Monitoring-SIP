@@ -66,6 +66,10 @@ def create_lab(data_dir: Path, port: int):
     """Создать процесс стенда; порт должен соответствовать HTTP-серверу."""
     data_dir = data_dir.resolve()
     token = prepare_data(data_dir)
+    # Процесс стенда не использует роль, подключение и доступ к телефонам узла.
+    for key in tuple(os.environ):
+        if key.startswith(("MONITORING_SIP_", "FEDERATION_", "YEALINK_")):
+            del os.environ[key]
     os.chdir(data_dir)
     module_name = "monitoring_sip_phone_lab_server"
     spec = importlib.util.spec_from_file_location(module_name, ROOT / "server.py")
@@ -101,11 +105,9 @@ def create_lab(data_dir: Path, port: int):
             raise RuntimeError("Не удалось передать событие мониторингу") from exc
 
     lab = PhoneLab(send_event)
-    original_ping = srv.ping_once
-
     def lab_ping(ip):
         phone = next((p for p in lab.state()["phones"] if p["ip"] == ip), None)
-        return (1 if phone["power"] else None) if phone else original_ping(ip)
+        return 1 if phone and phone["power"] else None
 
     srv.ping_once = lab_ping
 
@@ -119,6 +121,8 @@ def create_lab(data_dir: Path, port: int):
         hostname = urllib.parse.urlsplit(request.host_url).hostname
         if not allowed or hostname not in {"127.0.0.1", "localhost", "::1"}:
             return jsonify(ok=False, error="Стенд доступен только на этом компьютере"), 403
+        if request.path == "/yealink/inspect":
+            return jsonify(ok=False, error="Стенд работает только с виртуальными телефонами"), 403
         if request.path.startswith("/lab/api/") and request.method == "POST":
             origin = request.headers.get("Origin")
             if (origin and origin != request.host_url.rstrip("/")) or request.headers.get("Sec-Fetch-Site") == "cross-site":
@@ -158,6 +162,28 @@ def create_lab(data_dir: Path, port: int):
             return jsonify(ok=False, error="Укажите телефон и действие"), 400
         try:
             lab.action(number, action, data.get("value"))
+            return jsonify(snapshot())
+        except ValueError as exc:
+            return jsonify(ok=False, error=str(exc)), 400
+        except RuntimeError as exc:
+            return jsonify(ok=False, error=str(exc)), 502
+
+    action_url_events = {key: {"key": key, "ru": ru, "en": en} for key, ru, en in srv.ACTION_URL_EVENTS}
+
+    @srv.app.get("/lab/api/action-url-events")
+    def lab_action_url_events():
+        return jsonify(events=list(action_url_events.values()))
+
+    @srv.app.post("/lab/api/action-url-event")
+    def lab_action_url_event():
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or set(data) - {"phone", "event", "remote"}:
+            return jsonify(ok=False, error="Укажите телефон и событие Action URL"), 400
+        number, event, remote = data.get("phone"), data.get("event"), data.get("remote", "")
+        if not all(isinstance(value, str) for value in (number, event, remote)) or event not in action_url_events:
+            return jsonify(ok=False, error="Выберите событие из каталога Action URL"), 400
+        try:
+            lab.send_single_event(number, event, remote)
             return jsonify(snapshot())
         except ValueError as exc:
             return jsonify(ok=False, error=str(exc)), 400
