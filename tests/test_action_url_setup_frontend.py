@@ -53,7 +53,7 @@ async function run() { __BODY__ }
 run().catch(error=>{console.error(error);process.exitCode=1;});
 '''
     script = harness.replace("__PROGRAM__", json.dumps(program), 1).replace("__CATALOG__", json.dumps(catalog), 1).replace("__BODY__", body, 1)
-    result = subprocess.run(["node", "-"], input=script, text=True, capture_output=True, timeout=15)
+    result = subprocess.run(["node", "-"], input=script, encoding="utf-8", capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -194,6 +194,107 @@ def test_out_of_order_catalog_response_cannot_restore_old_users_phones():
     assert result["selection"] == ""
 
 
+def test_admin_inspection_selects_the_card_and_compares_the_cfg_urls(srv):
+    with srv.client.session_transaction() as session:
+        session["username"] = "admin"
+        session["logged_in"] = True
+    catalog = srv.client.get("/action_url_events").get_json()["events"]
+    status = run_panel("""
+      vm.runInContext('selectActionUrlPhone()', browser);
+      assert.equal(element('aurl-phone-ip').value, '192.0.2.11');
+      element('aurl-number').value = '';
+      vm.runInContext('selectActionUrlPhoneByIp()', browser);
+      assert.equal(element('aurl-number').value, '101');
+      assert.equal(element('aurl-inspect').hidden, false);
+      assert.equal(element('aurl-inspect').disabled, false);
+
+      browser.fetch = async (url, options) => {
+        assert.equal(url, '/yealink/inspect');
+        assert.equal(options.method, 'POST');
+        const {ip, username, number, expected_urls} = JSON.parse(options.body);
+        assert.deepEqual({ip, username, number}, {ip:'192.0.2.11', username:'admin', number:'101'});
+        assert.equal(Object.keys(expected_urls).length, 48);
+        for (const {key} of CATALOG) {
+          assert.equal(expected_urls[key], vm.runInContext(`actionUrlFor(${JSON.stringify(key)})`, browser));
+        }
+        assert.equal(element('aurl-inspect').disabled, true);
+        return {ok:true, json:async()=>({ok:true, status:'compatible', model:'SIP-T30', firmware:'124.87.14.1',
+          counts:{match:44, empty:2, conflict:2, missing:'http://hidden.example.test'},
+          fields:{incoming_call:'http://hidden.example.test'}})};
+      };
+      await vm.runInContext('inspectYealinkPhone()', browser);
+      assert.equal(element('aurl-inspect').disabled, false);
+      console.log(JSON.stringify(element('aurl-inspect-status').textContent));
+    """, catalog)
+    assert "SIP-T30" in status
+    assert "124.87.14.1" in status
+    assert "Совпало 44" in status
+    assert "Пусто 2" in status
+    assert "Отличаются 2" in status
+    assert "hidden.example.test" not in status
+    assert "synthetic-admin-token" not in status
+
+
+def test_inspection_rejects_ambiguous_ip_and_is_admin_only():
+    assert run_panel("""
+      browser.fetch = () => assert.fail('unexpected request');
+      vm.runInContext("aurlPhones.push({number:'102',ip:'192.0.2.11'})", browser);
+      element('aurl-number').value = '__auto__';
+      element('aurl-phone-ip').value = '192.0.2.11';
+      vm.runInContext('selectActionUrlPhoneByIp()', browser);
+      assert.equal(element('aurl-number').value, '__auto__');
+      assert.equal(element('aurl-download').disabled, false);
+      assert.equal(element('aurl-inspect').disabled, true);
+      await vm.runInContext('inspectYealinkPhone()', browser);
+
+      browser.currentUserInfo.is_admin = false;
+      vm.runInContext('aurlPhones.pop()', browser);
+      element('aurl-number').value = '101';
+      vm.runInContext('selectActionUrlPhone()', browser);
+      assert.equal(element('aurl-inspect-target').hidden, true);
+      assert.equal(element('aurl-inspect').hidden, true);
+      await vm.runInContext('inspectYealinkPhone()', browser);
+      console.log(JSON.stringify(true));
+    """) is True
+
+
+@pytest.mark.parametrize("changed_input", ["aurl-host", "aurl-user", "aurl-number", "aurl-phone-ip"])
+def test_inspection_discards_stale_result_even_when_selection_is_restored(changed_input):
+    assert run_panel("""
+      const input = %s;
+      vm.runInContext('selectActionUrlPhone()', browser);
+      let resolveInspection;
+      browser.fetch = () => new Promise(resolve => { resolveInspection = resolve; });
+      const pending = vm.runInContext('inspectYealinkPhone()', browser);
+      assert.ok(resolveInspection);
+      const old = element(input).value;
+      const syncSelection = input === 'aurl-number' ? 'selectActionUrlPhone()'
+        : input === 'aurl-phone-ip' ? 'selectActionUrlPhoneByIp()' : 'renderActionUrls()';
+      element(input).value = {'aurl-host':'other.example.test', 'aurl-user':'bob',
+        'aurl-number':'__auto__', 'aurl-phone-ip':'192.0.2.12'}[input];
+      vm.runInContext(syncSelection, browser);
+      element(input).value = old;
+      vm.runInContext(syncSelection, browser);
+      resolveInspection({ok:true, json:async()=>({ok:true, status:'compatible', model:'SIP-T30'})});
+      await pending;
+      assert.equal(element('aurl-inspect-status').textContent, '');
+      assert.equal(element('aurl-inspect').disabled, false);
+      console.log(JSON.stringify(true));
+    """ % json.dumps(changed_input)) is True
+
+
+def test_inspection_error_displays_a_fixed_message_instead_of_raw_response():
+    status = run_panel("""
+      vm.runInContext('selectActionUrlPhone()', browser);
+      browser.fetch = async()=>({ok:false, json:async()=>({ok:false, code:'certificate_mismatch',
+        error:'https://hidden.example.test/?token=raw-response-token'})});
+      await vm.runInContext('inspectYealinkPhone()', browser);
+      console.log(JSON.stringify(element('aurl-inspect-status').textContent));
+    """)
+    assert "Сертификат телефона" in status
+    assert "raw-response-token" not in status
+
+
 def test_unresolved_and_missing_peer_diagnostics_escape_phone_input():
     result = run_panel("""
       const unresolved = vm.runInContext('resolvedNote({number:""})',browser);
@@ -213,3 +314,15 @@ def test_phone_diagnostics_escape_raw_values_and_never_include_a_token():
     assert "&lt;img&gt;" in result
     assert "&lt;script&gt;" in result
     assert "must-not-be-rendered" not in result
+
+
+def test_event_diagnostics_use_only_known_rejection_labels():
+    result = run_panel("""
+      const reasons = ['unresolved', 'not_owned', 'ambiguous_number', '<raw-token>'];
+      console.log(JSON.stringify(reasons.map(rejection => vm.runInContext(
+        `eventDiagnostics({rejection:${JSON.stringify(rejection)}})`, browser))));
+    """)
+    assert "Карточка не определена" in result[0]
+    assert "номер отсутствует у владельца токена" in result[1].lower()
+    assert "разные или неполные ip" in result[2].lower()
+    assert result[3] == ""

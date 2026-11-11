@@ -20,7 +20,7 @@ WIN_URL="https://www.python.org/ftp/python/${PY_VER}/${WIN_ZIP}"
 LIN_TGZ="cpython-${PY_VER}+${PBS_TAG}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
 LIN_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${LIN_TGZ//+/%2B}"
 
-if [ -n "$(git -C "$REPO" status --porcelain -- server.py panel.html login.html static)" ]; then
+if [ -n "$(git -C "$REPO" status --porcelain -- server.py yealink_setup.py panel.html login.html static)" ]; then
     echo "ВНИМАНИЕ: в коде приложения есть незакоммиченные правки — в комплект идёт HEAD ($REV)." >&2
 fi
 
@@ -38,7 +38,7 @@ PIPDL=(python3 -m pip download -q --no-deps --only-binary=:all: --python-version
 rm -rf "$KIT" && mkdir -p "$KIT/app" "$KIT/vendor" "$KIT/runtime/windows" "$KIT/runtime/linux"
 
 # Приложение — только отслеживаемые файлы из HEAD (без auth.json, .env, users_data/)
-git -C "$REPO" archive HEAD server.py panel.html login.html static | tar -x -C "$KIT/app"
+git -C "$REPO" archive HEAD server.py yealink_setup.py panel.html login.html static | tar -x -C "$KIT/app"
 
 # vendor/: распакованные колёса из лока (по одной версии каждого пакета)
 python3 - "$HERE/requirements.lock" "$CACHE/wheels" "$KIT/vendor" <<'EOF'

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>SIP Monitor by Стёпчик SVL 1.1.1</title>
+<title>SIP Monitor by Стёпчик SVL 1.2</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="/static/socket.io.min.js"></script>
@@ -775,6 +775,7 @@ tbody td:first-child { color: var(--text); }
 .aurl-controls label { display:block;font-size:11px;color:var(--text-dim);margin-bottom:5px; }
 .aurl-status { font-size:12px;color:var(--text-dim);line-height:1.5; }
 .aurl-status.error { color:#fca5a5; }
+.aurl-inspect[hidden] { display:none; }
 .aurl-auto-note { font-size:12px;color:var(--orange);line-height:1.5; }
 .aurl-details { margin-top:5px;font-size:11px;color:var(--text-dim);word-break:break-word; }
 .aurl-details summary { cursor:pointer; }
@@ -830,7 +831,7 @@ tbody td:first-child { color: var(--text); }
       </div>
       <div>
         <div class="logo-name">SIP Monitor</div>
-        <div class="logo-ver">Rel 1.1.1</div>
+        <div class="logo-ver">Rel 1.2</div>
       </div>
     </div>
 
@@ -1043,9 +1044,14 @@ tbody td:first-child { color: var(--text); }
             </div>
             <div>
               <label for="aurl-number">Номер этого телефона</label>
-              <select id="aurl-number" class="filter-sel" style="width:100%" onchange="renderActionUrls()">
+              <select id="aurl-number" class="filter-sel" style="width:100%" onchange="selectActionUrlPhone()">
                 <option value="">Выберите номер</option>
               </select>
+            </div>
+            <div id="aurl-inspect-target" class="aurl-inspect" hidden>
+              <label for="aurl-phone-ip">IP телефона</label>
+              <input id="aurl-phone-ip" class="modal-inp" oninput="selectActionUrlPhoneByIp()"
+                     placeholder="192.168.1.20" spellcheck="false" autocomplete="off">
             </div>
           </div>
           <div id="aurl-auto-note" class="aurl-auto-note" hidden>
@@ -1056,8 +1062,10 @@ tbody td:first-child { color: var(--text); }
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:10px">
             <button class="btn btn-primary" id="aurl-download" onclick="downloadActionUrlConfig()" disabled>Скачать CFG для Yealink</button>
+            <button class="btn btn-ghost aurl-inspect" id="aurl-inspect" onclick="inspectYealinkPhone()" hidden disabled>Проверить телефон</button>
             <button class="btn btn-ghost" id="aurl-copy-all" onclick="copyAllActionUrls(this)" disabled>Скопировать все URL</button>
           </div>
+          <div id="aurl-inspect-status" class="aurl-status aurl-inspect" role="status" aria-live="polite" hidden></div>
           <div class="aurl-status">CFG использует параметры Yealink T53; совместимость зависит от модели и прошивки.
             Импорт в ТЕЛТА «Спектр-101» пока не подтверждён. Для ручной настройки копируйте URL
             в одноимённые поля телефона и сохраните изменения.</div>
@@ -1655,6 +1663,9 @@ let aurlCatalogUser = '';
 let aurlLoading = false;
 let aurlRequest = 0;
 let serverIp = '';
+let aurlInspectRequest = 0;
+let aurlInspectKey = '';
+let aurlInspectPending = false;
 
 function defaultServerHost() {
   // Панель открыта на самом сервере — телефонам нужен его адрес в локалке
@@ -1700,6 +1711,7 @@ async function loadActionUrlPhones() {
   $('aurl-number').innerHTML = '<option value="">Загрузка карточек…</option>';
   $('aurl-number').value = '';
   $('aurl-number').disabled = true;
+  $('aurl-phone-ip').value = '';
   renderActionUrls();
   try {
     if (!username) throw new Error('Выберите пользователя.');
@@ -1736,7 +1748,7 @@ async function loadActionUrlPhones() {
   } finally {
     if (requestId === aurlRequest) aurlLoading = false;
   }
-  if (requestId === aurlRequest && username === $('aurl-user').value) renderActionUrls();
+  if (requestId === aurlRequest && username === $('aurl-user').value) selectActionUrlPhoneByIp();
 }
 
 function actionUrlOrigin() {
@@ -1798,6 +1810,144 @@ function renderActionUrls() {
   }
   $('aurl-copy-all').disabled = !valid;
   $('aurl-download').disabled = !valid;
+  updateYealinkInspectionControls();
+}
+
+function normalizeActionUrlIp(value) {
+  const ip = String(value || '').trim();
+  if (/^(0|[1-9]\d{0,2})(\.(0|[1-9]\d{0,2})){3}$/.test(ip)
+      && ip.split('.').every(part => Number(part) <= 255)) return ip;
+  if (ip.includes(':') && /^[\da-f:.]+$/i.test(ip)) {
+    try { return new URL(`http://[${ip}]`).hostname.slice(1, -1); }
+    catch (error) { return ''; }
+  }
+  return '';
+}
+
+function actionUrlPhoneByIp(ip) {
+  if (!ip || aurlLoading || aurlCatalogUser !== $('aurl-user').value) return null;
+  const matches = aurlPhones.filter(phone => normalizeActionUrlIp(phone.ip) === ip);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function selectActionUrlPhone() {
+  const phone = aurlPhones.find(item => String(item.number) === $('aurl-number').value);
+  $('aurl-phone-ip').value = String(phone?.ip || '').trim();
+  renderActionUrls();
+}
+
+function selectActionUrlPhoneByIp() {
+  const phone = actionUrlPhoneByIp(normalizeActionUrlIp($('aurl-phone-ip').value));
+  if (phone && currentUserInfo?.is_admin === true) $('aurl-number').value = String(phone.number);
+  renderActionUrls();
+}
+
+function yealinkInspectionKey() {
+  return JSON.stringify([aurlRequest, $('aurl-user').value, $('aurl-number').value,
+    $('aurl-host').value, $('aurl-phone-ip').value]);
+}
+
+function setYealinkInspectionStatus(message, error = false) {
+  const status = $('aurl-inspect-status');
+  status.textContent = message;
+  status.hidden = !message || currentUserInfo?.is_admin !== true;
+  status.classList[error ? 'add' : 'remove']('error');
+}
+
+function updateYealinkInspectionControls() {
+  const key = yealinkInspectionKey();
+  if (key !== aurlInspectKey) {
+    aurlInspectKey = key;
+    ++aurlInspectRequest;
+    aurlInspectPending = false;
+    setYealinkInspectionStatus('');
+  }
+  const admin = currentUserInfo?.is_admin === true;
+  const button = $('aurl-inspect');
+  $('aurl-inspect-target').hidden = !admin;
+  button.hidden = !admin;
+  const rawIp = $('aurl-phone-ip').value.trim();
+  const phone = actionUrlPhoneByIp(normalizeActionUrlIp(rawIp));
+  const matchesSelection = phone && String(phone.number) === $('aurl-number').value;
+  button.disabled = !admin || aurlInspectPending || $('aurl-download').disabled || !matchesSelection;
+  if (!admin) setYealinkInspectionStatus('');
+  else if (rawIp && !aurlLoading && !matchesSelection && !$('aurl-inspect-status').textContent) {
+    setYealinkInspectionStatus('Укажите IP, который однозначно соответствует карточке выбранного пользователя.', true);
+  }
+}
+
+const yealinkInspectionErrors = new Map([
+  ['forbidden', 'Проверка телефона доступна администратору.'],
+  ['not_configured', 'На сервере требуется настроить доступ к сети телефонов и учётную запись Yealink.'],
+  ['card_mismatch', 'Проверьте IP и выбранную карточку.'],
+  ['busy', 'Дождитесь завершения другой проверки телефона.'],
+  ['address_not_allowed', 'IP телефона вне сети, разрешённой для проверки.'],
+  ['certificate_mismatch', 'Сертификат телефона отличается от заданного на сервере.'],
+  ['certificate_untrusted', 'Сервер не доверяет HTTPS-сертификату телефона.'],
+  ['tls_error', 'Не удалось установить HTTPS-соединение с телефоном.'],
+  ['network_error', 'Телефон недоступен с сервера.'],
+  ['login_failed', 'Телефон не принял серверную учётную запись Yealink.'],
+]);
+
+function showYealinkInspection(data) {
+  const labels = new Map([
+    ['compatible', 'Телефон совместим с профилем Action URL.'],
+    ['unsupported_profile', 'Модель или прошивка вне проверенного профиля.'],
+    ['unsupported_layout', 'Состав полей Action URL отличается от проверенного.'],
+  ]);
+  const label = labels.get(data.status);
+  if (!label) throw new Error('Неизвестный статус проверки телефона');
+  const model = typeof data.model === 'string' && /^[a-z][a-z\d ._()-]{0,31}$/i.test(data.model) ? data.model : '';
+  const firmware = typeof data.firmware === 'string' && /^\d{1,4}(\.\d{1,4}){2,5}$/.test(data.firmware) ? data.firmware : '';
+  const counts = [
+    ['match', 'Совпало'], ['empty', 'Пусто'], ['conflict', 'Отличаются'],
+    ['configured', 'Заполнено'], ['missing', 'Нет поля'],
+  ].flatMap(([name, caption]) => {
+    const count = data.counts?.[name];
+    return Number.isSafeInteger(count) && count >= 0 && count <= actionUrlEvents.length
+      ? [`${caption} ${count}`] : [];
+  });
+  setYealinkInspectionStatus([label, model, firmware, ...counts].filter(Boolean).join(' · '));
+}
+
+async function inspectYealinkPhone() {
+  updateYealinkInspectionControls();
+  if ($('aurl-inspect').disabled) return;
+
+  const ip = normalizeActionUrlIp($('aurl-phone-ip').value);
+  const username = $('aurl-user').value;
+  const number = $('aurl-number').value;
+  const key = yealinkInspectionKey();
+  const requestId = ++aurlInspectRequest;
+  const stillSelected = () => requestId === aurlInspectRequest && key === yealinkInspectionKey()
+    && currentUserInfo?.is_admin === true;
+
+  aurlInspectPending = true;
+  setYealinkInspectionStatus('Проверяем телефон…');
+  updateYealinkInspectionControls();
+  try {
+    const expected_urls = Object.fromEntries(actionUrlEvents.map(event => [event.key, actionUrlFor(event.key)]));
+    const response = await fetch('/yealink/inspect', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ip, username, number, expected_urls}),
+    });
+    const data = await response.json();
+    if (!stillSelected()) return;
+    if (!response.ok || data.ok !== true) {
+      setYealinkInspectionStatus(yealinkInspectionErrors.get(data.code)
+        || 'Проверка не удалась. Проверьте доступность телефона с сервера.', true);
+      return;
+    }
+    showYealinkInspection(data);
+  } catch (error) {
+    if (stillSelected()) setYealinkInspectionStatus('Не удалось получить результат проверки телефона.', true);
+  } finally {
+    if (requestId === aurlInspectRequest) {
+      aurlInspectPending = false;
+      updateYealinkInspectionControls();
+    }
+  }
 }
 
 function buildActionUrlConfig() {
@@ -1887,10 +2037,16 @@ function remoteNote(e) {
     note += `${note ? '. ' : ''}Показан набранный номер исходящего вызова`;
   return note ? `<div class="aurl-en">${esc(note)}</div>` : '';
 }
+const eventRejectionReasons = new Map([
+  ['unresolved', 'Карточка не определена'],
+  ['not_owned', 'Номер отсутствует у владельца токена'],
+  ['ambiguous_number', 'У карточек с этим номером разные или неполные IP'],
+]);
 function eventDiagnostics(e) {
   const fields = [
     ['local', e.raw_local], ['remote', e.raw_remote], ['called_number', e.raw_called_number],
     ['Модель', e.model], ['Прошивка', e.firmware],
+    ['Причина', eventRejectionReasons.get(e.rejection)],
   ].filter(([, value]) => value !== undefined && value !== null && value !== '');
   if (!fields.length) return '';
   return `<details class="aurl-details"><summary>Параметры телефона</summary>${fields.map(([name, value]) =>

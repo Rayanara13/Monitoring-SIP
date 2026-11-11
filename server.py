@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, send_file, session, redirect, url_for
 from flask_socketio import SocketIO
+from flask import has_request_context
 import json
 import time
 import subprocess
@@ -23,6 +24,21 @@ from logging.handlers import RotatingFileHandler
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+
+
+def redact_access_log(record):
+    message = record.getMessage()
+    redacted = re.sub(r"(?i)([?&](?:token|event_token)=)[^&\s\"]*", r"\1[скрыто]", message)
+    if redacted != message:
+        record.msg = redacted
+        record.args = ()
+    return True
+
+
+access_logger = logging.getLogger("werkzeug")
+if not any(getattr(item, "__name__", "") == "redact_access_log" for item in access_logger.filters):
+    access_logger.addFilter(redact_access_log)
+
 # allow_upgrades=True — используем WebSocket если доступен, иначе polling
 # ping_timeout/ping_interval — агрессивное обнаружение потери соединения
 socketio = SocketIO(
@@ -35,7 +51,7 @@ socketio = SocketIO(
 
 # Меняется с каждым выпуском: открытые панели сравнивают её с запомненной
 # при первом подключении и предлагают перезагрузить страницу
-VERSION = "Rel 1.1.1"
+VERSION = "Rel 1.2"
 
 PHONES_DIR = Path("users_data")
 AUTH_FILE = Path("auth.json")
@@ -109,6 +125,7 @@ CLIENT_LOG_RATE_WINDOW = 60
 
 users_phones = {} # {username: {number: phone_data}}
 pending_calls = {} # {local: {ts_start, direction, remote, username}}
+closed_call_ids: dict[tuple[str, str], dict[str, float]] = {}
 phone_flags = {}   # {number: {dnd, fwd_*, mute, audio, reg, missed, ...}} — функции из Action URL
 mac_numbers = {}   # {(username, mac): {number}} — выучено из событий с номером и $mac
 recent_events = deque(maxlen=300)  # последние /event — журнал на вкладке «Тесты»
@@ -160,7 +177,7 @@ def is_event_rate_limited(ip: str) -> bool:
     rec["count"] += 1
     return rec["count"] > EVENT_RATE_LIMIT
 
-API_AUTH_ROUTES = {"/phones", "/add_phone", "/update_phone", "/delete_phone", "/reorder"}
+API_AUTH_ROUTES = {"/phones", "/add_phone", "/update_phone", "/delete_phone", "/reorder", "/yealink/inspect"}
 
 
 def get_local_ip():
@@ -217,13 +234,14 @@ def before_request_func():
     if request.method == "GET" and TARGET_IP and LOCAL_IP != TARGET_IP:
         duplicate_get_request(request.path, request.args.to_dict())
 
-    # Логируем все входящие HTTP-запросы
+    query = {key: value for key, value in request.args.items()
+             if key.lower() not in {"token", "event_token", "password"}}
     alog("HTTP_REQ",
          method=request.method,
          path=request.path,
          ip=get_client_ip(),
          user=session.get("username"),
-         query=dict(request.args) or None)
+         query=query or None)
 
 
 @app.errorhandler(Exception)
@@ -451,7 +469,11 @@ def complete_call(user_phone: str, event_id: int | None = None,
     pending для них норма, а не CALL_MISS.
     """
     with lock:
-        call = pending_calls.pop(user_phone, None)
+        now = time.time()
+        call = _pending_call(user_phone, now)
+        if call:
+            pending_calls.pop(user_phone)
+            _remember_closed_call(user_phone, call, now)
     if call:
         ts_end = time.time()
         duration = int(ts_end - call["ts_start"])
@@ -561,7 +583,7 @@ def clean_remote(value: str | None) -> str:
     if not value:
         return ""
     value = str(value).strip()
-    if value.startswith("$"):
+    if value.startswith("$") or value.lower() in {"sip:", "sip:@", "sips:", "sips:@"}:
         return ""
     
     # Регулярное выражение: ищем sip: (без учета регистра), захватываем все до @ или :
@@ -578,6 +600,11 @@ def clean_remote(value: str | None) -> str:
          return value.split(':')[0]
 
     return value
+
+
+def normalize_call_id(value: str | None) -> str:
+    call_id = (value or "").strip()[:100]
+    return "" if call_id == "-1" or call_id.startswith("$") else call_id
 
 
 def broadcast_update(event_id: int | None = None):
@@ -613,12 +640,17 @@ PEER_KEEP_STATES = TALK_STATES | {"Абонент_занят"}
 REST_STATES = {"В_покое", "OFFLINE", "DND", "Нет_регистрации"}
 # Зависшие дольше 60 с сбрасывает watchdog в ping_loop
 STUCK_STATES = {"Снята_трубка", "Входящий_вызов", "Исходящий_вызов", "Абонент_занят"}
+STUCK_TIMEOUT = 60
+LATE_ANSWER_GRACE = 60
+MAX_CLOSED_IDS = 16
 
 
 def set_state(number: str, state: str, peer: str | None = None,
               event_id: int | None = None) -> None:
     found = False
     with lock:
+        if conflicting_number(number):
+            return
         # Ищем номер у всех пользователей
         for username, phones in users_phones.items():
             if number in phones:
@@ -685,7 +717,7 @@ def get_sorted_phones(username: str) -> list[dict]:
             entry = {"number": number, **phone}
             if phone.get("call_start") is not None:
                 entry["duration_sec"] = int(now - phone["call_start"])
-            flags = phone_flags.get(number, {})
+            flags = {} if conflicting_number(number) else phone_flags.get(number, {})
             entry["flags"] = {k: flags[k] for k in PUBLIC_FLAGS if k in flags}
             result.append(entry)
 
@@ -892,9 +924,6 @@ def resolve_number(local: str, mac: str, phone_ip: str, user: str) -> tuple[str,
     подделывается.
     """
     if local:
-        if mac:
-            with lock:
-                mac_numbers.setdefault((user, mac), set()).add(local)
         return local, "local"
     with lock:
         ip_numbers = {num for num, phone in users_phones.get(user, {}).items()
@@ -930,6 +959,13 @@ def find_phone(number: str) -> dict | None:
     return None
 
 
+def conflicting_number(number: str) -> bool:
+    """Общий номер допустим только для копий одной карточки с одним IP. Под lock."""
+    addresses = [normalize_ip(phones[number].get("ip"))
+                 for phones in users_phones.values() if number in phones]
+    return len(addresses) > 1 and (not all(addresses) or len(set(addresses)) > 1)
+
+
 def current_state(number: str) -> str | None:
     """Вызывать под lock."""
     phone = find_phone(number)
@@ -948,9 +984,73 @@ def rest_state(number: str) -> str:
     return "В_покое"
 
 
+def _event_call_id() -> str:
+    return normalize_call_id(request.args.get("call_id")) if has_request_context() else ""
+
+
+def _remember_closed_call(number: str, call: dict, now: float) -> None:
+    """Вызывать под lock. Недавние закрытые ID подавляют запоздалые события."""
+    call_id = call.get("call_id", "")
+    timed_out = "recover_until" in call or call.get("recovered", False)
+    if not call_id and not timed_out:
+        return
+    ids = closed_call_ids.setdefault((call["username"], number), {})
+    if call_id:
+        ids[call_id] = now + LATE_ANSWER_GRACE
+    if timed_out:
+        ids[""] = now + LATE_ANSWER_GRACE
+    while len(ids) > MAX_CLOSED_IDS:
+        ids.pop(next(iter(ids)))
+
+
+def _closed_call(number: str, user: str, call_id: str, now: float) -> bool:
+    """Вызывать под lock. Пустой ID отмечает неоднозначное событие после таймаута."""
+    return closed_call_ids.get((user, number), {}).get(call_id, 0) > now
+
+
+def _pending_call(number: str, now: float) -> dict | None:
+    """Вызывать под lock. Сброшенная карточка хранит попытку ограниченное время."""
+    call = pending_calls.get(number)
+    if call and "recover_until" in call and now >= call["recover_until"]:
+        pending_calls.pop(number)
+        _remember_closed_call(number, call, now)
+        return None
+    return call
+
+
+def _matches_pending(call: dict, call_id: str, remote: str, *, check_peer: bool) -> bool:
+    previous_id = call.get("call_id", "")
+    if call_id and previous_id:
+        return call_id == previous_id
+    return not (check_peer and remote and call["remote"] and remote != call["remote"])
+
+
+def _can_answer_incoming(number: str, user: str, state: str | None, remote: str) -> bool:
+    now, call_id = time.time(), _event_call_id()
+    with lock:
+        call = _pending_call(number, now)
+        if not call or call["direction"] != "in" or (call_id and _closed_call(number, user, call_id, now)):
+            return False
+        if state == "Входящий_вызов":
+            return _matches_pending(call, call_id, remote, check_peer=_closed_call(number, user, "", now))
+        return (state in {"В_покое", "DND"} and call["username"] == user
+                and call.get("recover_state") == "Входящий_вызов"
+                and _matches_pending(call, call_id, remote, check_peer=True))
+
+
+def _terminal_for_replaced_call(number: str, user: str) -> bool:
+    call_id = _event_call_id()
+    if not call_id:
+        return False
+    now = time.time()
+    with lock:
+        call = _pending_call(number, now)
+        return bool(call and call_id != call.get("call_id") and _closed_call(number, user, call_id, now))
+
+
 def record_event(key: str | None, number: str, local: str, resolved_by: str,
                  remote: str, phone_ip: str, call_id: str, user: str,
-                 details: dict | None = None) -> None:
+                 details: dict | None = None, *, update_card: bool = True) -> None:
     """Последнее событие на карточке + журнал для вкладки «Тесты»."""
     label = EVENT_LABELS.get(key)
     now = time.strftime("%H:%M:%S")
@@ -962,7 +1062,7 @@ def record_event(key: str | None, number: str, local: str, resolved_by: str,
             "call_id": call_id, "user": user,
             **(details or {}),
         })
-        if number and label:
+        if update_card and number and label:
             flags = phone_flags.setdefault(number, {})
             flags["last_event"] = label
             flags["last_event_time"] = now
@@ -978,9 +1078,14 @@ def record_event(key: str | None, number: str, local: str, resolved_by: str,
 # освободится. Без него (старая настройка) Terminated / On Hook, как раньше,
 # завершают всё — иначе карточка могла бы навсегда застрять в «Удержании».
 
-def start_call(number: str, direction: str, remote: str, user: str) -> bool:
-    """Начинает учёт звонка. True — вторая линия поверх идущего звонка."""
+def start_call(number: str, direction: str, remote: str, user: str) -> bool | None:
+    """Начинает звонок. True — вторая линия, None — повтор известного события."""
+    now, call_id = time.time(), _event_call_id()
     with lock:
+        previous = _pending_call(number, now)
+        if call_id and (_closed_call(number, user, call_id, now)
+                        or (previous and previous["username"] == user and previous.get("call_id") == call_id)):
+            return None
         phone = find_phone(number)
         cur = phone["state"] if phone else None
         flags = phone_flags.setdefault(number, {})
@@ -992,12 +1097,15 @@ def start_call(number: str, direction: str, remote: str, user: str) -> bool:
         else:
             flags["lines"] = 1
             flags.pop("line2", None)
-        if not second or number not in pending_calls:
+        if not second or not previous:
+            if previous and "recover_until" in previous:
+                _remember_closed_call(number, previous, now)
             pending_calls[number] = {
-                "ts_start": time.time(),
+                "ts_start": now,
                 "direction": direction,
                 "remote": remote,
                 "username": user,
+                "call_id": call_id,
             }
         return second
 
@@ -1043,14 +1151,20 @@ def end_line(number: str, event_id: int, quiet: bool = False,
 
 
 def end_attempt(number: str, event_id: int, expect: set[str],
-                show: str | None = None) -> None:
+                show: str | None = None, *, user: str, remote: str) -> None:
     """Неудачная попытка вызова (отбой, занято, отмена, пропущен, переадресован).
 
     Была вторая линия — возвращаем карточку к первой. Иначе завершаем, только
     если карточка в ожидаемом состоянии попытки: событие от линии, которой мы не
     видели, не должно ронять идущий разговор.
     """
+    now, call_id = time.time(), _event_call_id()
     with lock:
+        call = _pending_call(number, now)
+        if call_id and _closed_call(number, user, call_id, now):
+            return
+        timed_out_attempt = (call and call["username"] == user and call.get("recover_state") in expect
+                             and _matches_pending(call, call_id, remote, check_peer=True))
         flags = phone_flags.setdefault(number, {})
         line2 = flags.pop("line2", None)
         if line2:
@@ -1058,6 +1172,8 @@ def end_attempt(number: str, event_id: int, expect: set[str],
         cur = current_state(number)
     if line2:
         set_state(number, line2["state"], line2["peer"] or None, event_id=event_id)
+    elif timed_out_attempt:
+        end_call(number, event_id, quiet=True)
     elif cur in expect:
         if show:
             # pending живёт до отбоя трубки — иначе On Hook не найдёт звонок
@@ -1071,13 +1187,19 @@ def end_attempt(number: str, event_id: int, expect: set[str],
 # ── Обработчики: handler(number, remote, phone_ip, user, event_id) ──
 
 def _ev_outgoing(n, remote, ip, user, eid):
-    if start_call(n, "out", remote, user):
+    second = start_call(n, "out", remote, user)
+    if second is None:
+        return
+    if second:
         alog("SIP_SECOND_LINE", event_id=eid, number=n, remote=remote, direction="out")
     set_state(n, "Исходящий_вызов", remote, event_id=eid)
 
 
 def _ev_incoming(n, remote, ip, user, eid):
-    if start_call(n, "in", remote, user):
+    second = start_call(n, "in", remote, user)
+    if second is None:
+        return
+    if second:
         # Второй входящий поверх звонка: карточку не трогаем, иначе после
         # отбоя звонящего watchdog сбросил бы идущий разговор в покой
         alog("SIP_SECOND_LINE", event_id=eid, number=n, remote=remote, direction="in")
@@ -1086,28 +1208,54 @@ def _ev_incoming(n, remote, ip, user, eid):
     set_state(n, "Входящий_вызов", remote, event_id=eid)
 
 
-def _connect(n, remote, user, eid, direction=None):
-    # Если remote пустой — сохраняем peer из предыдущего состояния (Ringing/Setup)
-    if not remote:
-        with lock:
+def _connect(n, remote, user, eid, direction=None, *, require_pending=False):
+    now, call_id = time.time(), _event_call_id()
+    with lock:
+        call = _pending_call(n, now)
+        if require_pending and not call:
+            return
+        if (call_id or not call) and _closed_call(n, user, call_id, now):
+            return
+        flags = phone_flags.setdefault(n, {})
+        recovering = call and "recover_until" in call
+        if call and flags.get("lines", 0) <= 1 and not _matches_pending(
+                call, call_id, remote, check_peer=bool(recovering or _closed_call(n, user, "", now))):
+            return
+        if recovering:
+            expected_state = "Входящий_вызов" if call["direction"] == "in" else "Исходящий_вызов"
+            if call["username"] != user or call.get("recover_state") != expected_state:
+                return
+            call.pop("recover_until")
+            call.pop("recover_state")
+            call["recovered"] = True
+            flags["lines"] = 1
+            for phones in users_phones.values():
+                if n in phones:
+                    phones[n]["call_start"] = call["ts_start"]
+        if not remote:
+            # После таймаута видимый peer сброшен, но исходный номер есть в попытке.
             phone = find_phone(n)
             remote = (phone.get("peer") or "") if phone else ""
-        if remote:
-            alog("SIP_PEER_PRESERVED", event_id=eid, number=n, peer=remote)
-    with lock:
-        flags = phone_flags.setdefault(n, {})
+            if call and (not remote or remote == "Не определен"):
+                remote = call["remote"]
+            if remote:
+                alog("SIP_PEER_PRESERVED", event_id=eid, number=n, peer=remote)
         flags.pop("line2", None)  # вторая линия ответила — возвращать некуда
-        if n in pending_calls:
+        if call:
             # При нескольких линиях pending принадлежит первой — собеседника не меняем
-            if remote and flags.get("lines", 0) <= 1:
-                pending_calls[n]["remote"] = remote
+            if flags.get("lines", 0) <= 1:
+                if remote:
+                    call["remote"] = remote
+                if call_id and not call.get("call_id"):
+                    call["call_id"] = call_id
         elif direction:
             flags["lines"] = 1
             pending_calls[n] = {
-                "ts_start": time.time(),
+                "ts_start": now,
                 "direction": direction,
                 "remote": remote,
                 "username": user,
+                "call_id": call_id,
             }
     set_state(n, "Разговор", remote, event_id=eid)
 
@@ -1121,18 +1269,21 @@ def _ev_answer_new(n, remote, ip, user, eid):
 
 
 def _ev_terminated(n, remote, ip, user, eid):
-    end_line(n, eid)
+    if not _terminal_for_replaced_call(n, user):
+        end_line(n, eid)
 
 
 def _ev_on_hook(n, remote, ip, user, eid):
-    end_line(n, eid, ignore_if_multi=True)
+    if not _terminal_for_replaced_call(n, user):
+        end_line(n, eid, ignore_if_multi=True)
 
 
 def _ev_busy_to_idle(n, remote, ip, user, eid):
     # Телефон целиком свободен — все линии кончились
     with lock:
         phone_flags.setdefault(n, {})["busy_to_idle_seen"] = True
-    end_call(n, eid, quiet=True)
+    if not _terminal_for_replaced_call(n, user):
+        end_call(n, eid, quiet=True)
 
 
 def _ev_call_end_quiet(n, remote, ip, user, eid):
@@ -1140,16 +1291,24 @@ def _ev_call_end_quiet(n, remote, ip, user, eid):
 
 
 def _ev_off_hook(n, remote, ip, user, eid):
+    now, call_id = time.time(), _event_call_id()
     with lock:
-        in_call = n in pending_calls
+        in_call = _pending_call(n, now) is not None
+        if call_id and _closed_call(n, user, call_id, now):
+            return
         cur = current_state(n)
-    if cur == "Входящий_вызов":
+        flags = phone_flags.get(n, {})
+        audio_cleared = cur in TALK_STATES and flags.get("audio") is not None
+        if audio_cleared:
+            flags["audio"] = None
+    if _can_answer_incoming(n, user, cur, remote):
         # Трубку сняли, пока звонит, — это ответ (Established может не прийти)
-        _connect(n, remote, user, eid)
-    elif in_call:
-        # Если звонок уже идёт (громкая → трубка) — игнорируем OffHook,
-        # чтобы не сбить состояние "Разговор" / "Удержание"
-        alog("SIP_OFFHOOK_IGNORED", event_id=eid, number=n, reason="active_call")
+        _connect(n, remote, user, eid, require_pending=True)
+    elif in_call or cur in TALK_STATES:
+        # Off Hook во время разговора делает старый аудиозначок недостоверным.
+        # По этому событию нельзя определить текущий аудиоканал или ход звонка.
+        alog("SIP_OFFHOOK_IGNORED", event_id=eid, number=n, reason="active_call",
+             audio_cleared=audio_cleared)
         broadcast_update(event_id=eid)
     else:
         set_state(n, "Снята_трубка", event_id=eid)
@@ -1178,7 +1337,7 @@ def _attempt_ev(expect, show=None, counter=None):
             with lock:
                 flags = phone_flags.setdefault(n, {})
                 flags[counter] = flags.get(counter, 0) + 1
-        end_attempt(n, eid, expect, show)
+        end_attempt(n, eid, expect, show, user=user, remote=remote)
     return handler
 
 
@@ -1192,13 +1351,17 @@ def _flag_ev(name, value):
 
 def _audio_ev(value):
     def handler(n, remote, ip, user, eid):
+        now, call_id = time.time(), _event_call_id()
         with lock:
+            _pending_call(n, now)
+            if call_id and _closed_call(n, user, call_id, now):
+                return
             phone_flags.setdefault(n, {})["audio"] = value
             cur = current_state(n)
-        if cur == "Входящий_вызов":
+        if _can_answer_incoming(n, user, cur, remote):
             # Ответили кнопкой громкой связи / гарнитуры, не снимая трубку:
             # Established на части телефонов при этом не приходит
-            _connect(n, remote, user, eid)
+            _connect(n, remote, user, eid, require_pending=True)
         else:
             broadcast_update(event_id=eid)
     return handler
@@ -1357,14 +1520,12 @@ def event():
     # Проверяем токен у любого пользователя
     target_user = None
     for user_info in AUTH.values():
-        if user_info.get("event_token") == token:
+        if token and user_info.get("event_token") == token:
             target_user = user_info["username"]
             break
 
     if not target_user:
-        alog("SIP_BAD_TOKEN", "WARNING",
-             ip=client_ip,
-             token_prefix=token[:6] if token else None)
+        alog("SIP_BAD_TOKEN", "WARNING", ip=client_ip)
         return "Unauthorized", 401
 
     state  = request.args.get("state")
@@ -1379,10 +1540,7 @@ def event():
     remote = clean_remote(request.args.get("remote"))
     mac    = normalize_mac(request.args.get("mac"))
     phone_ip = normalize_ip(request.args.get("ip"))
-    # $call_id пока только в журнал/лог: по живым трассам решим, различает ли он линии
-    call_id = str(request.args.get("call_id") or "").strip()[:100]
-    if call_id.startswith("$"):
-        call_id = ""
+    call_id = normalize_call_id(request.args.get("call_id"))
     key = LEGACY_STATES.get(state, state)
 
     evt_id = _next_event_id()
@@ -1415,25 +1573,39 @@ def event():
              call_id=call_id or None,
              **details)
 
+        with lock:
+            owned = user_phone in users_phones.get(target_user, {})
+            ambiguous = owned and conflicting_number(user_phone)
+            accepted = owned and (not ambiguous or key == "ip_change")
+            if accepted and resolved_by == "local" and mac:
+                mac_numbers.setdefault((target_user, mac), set()).add(user_phone)
+
+        if not user_phone:
+            rejection = "unresolved"
+        elif not owned:
+            rejection = "not_owned"
+        elif not accepted:
+            rejection = "ambiguous_number"
+        else:
+            rejection = ""
         record_event(key, user_phone, local, resolved_by, remote, phone_ip, call_id,
-                     target_user, details)
+                     target_user, {**details, "rejection": rejection},
+                     update_card=accepted and not ambiguous)
 
         if not user_phone:
             alog("SIP_NO_LOCAL", "WARNING", event_id=evt_id, state=state, user=target_user)
             return "OK"
-
-        # Проверяем наличие номера в карточках
-        with lock:
-            phone_registered = (
-                target_user in users_phones and
-                user_phone in users_phones[target_user]
-            )
-        if not phone_registered:
+        if not owned:
             alog("SIP_PHONE_NOT_IN_CARDS", "WARNING",
                  event_id=evt_id,
                  number=user_phone,
                  user=target_user,
                  msg="Событие пришло для номера, которого нет в карточках пользователя")
+            return "OK"
+        if not accepted:
+            alog("SIP_AMBIGUOUS_NUMBER", "WARNING", event_id=evt_id,
+                 number=user_phone, user=target_user)
+            return "OK"
 
         handler = LEGACY_HANDLERS.get(state) or EVENT_HANDLERS.get(key)
         if handler is None:
@@ -1474,6 +1646,61 @@ def action_url_events():
             for k, ru, en in ACTION_URL_EVENTS
         ],
     })
+
+
+_yealink_inspect_lock = threading.Lock()
+
+
+@app.route("/yealink/inspect", methods=["POST"])
+@login_required
+def inspect_yealink():
+    """Сверяем профиль телефона по HTTPS, сохраняя устройство в исходном состоянии."""
+    from yealink_setup import YealinkSetupError, inspect_phone
+
+    if session.get("username") != "admin":
+        return jsonify(ok=False, code="forbidden", error="Проверка доступна администратору."), 403
+    if request.content_length is None or request.content_length > 40_000:
+        return jsonify(ok=False, code="payload_size", error="Слишком большой запрос проверки."), 413
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(ok=False, code="invalid_request", error="Неверные параметры проверки."), 400
+    ip = normalize_ip(data.get("ip")) if isinstance(data.get("ip"), str) else ""
+    owner, number = data.get("username"), data.get("number")
+    if not ip or not isinstance(owner, str) or not isinstance(number, str):
+        return jsonify(ok=False, code="invalid_target", error="Укажите IP телефона и выберите его карточку."), 400
+    with lock:
+        matches = [n for n, phone in users_phones.get(owner, {}).items()
+                   if normalize_ip(phone.get("ip")) == ip]
+    if owner not in AUTH or matches != [number]:
+        return jsonify(ok=False, code="card_mismatch",
+                       error="IP должен совпадать с адресом одной карточки выбранного пользователя."), 400
+    expected = data.get("expected_urls", {})
+    if not isinstance(expected, dict) or any(
+        key not in ACTION_URL_PARAMETERS or not isinstance(value, str) or len(value) > 511
+        for key, value in expected.items()
+    ):
+        return jsonify(ok=False, code="invalid_profile", error="Неверный профиль Action URL."), 400
+
+    def setting(name):
+        return os.environ[name] if name in os.environ else get_env_value(name)
+
+    cidrs = [item.strip() for item in setting("YEALINK_ALLOWED_CIDRS").split(",") if item.strip()]
+    username = setting("YEALINK_ADMIN_USER")
+    password = setting("YEALINK_ADMIN_PASSWORD")
+    if not cidrs or not username or not password:
+        return jsonify(ok=False, code="not_configured",
+                       error="На сервере нужно настроить доступ к сети телефонов и учётную запись Yealink."), 503
+    if not _yealink_inspect_lock.acquire(blocking=False):
+        return jsonify(ok=False, code="busy", error="Другая проверка телефона ещё идёт."), 409
+    try:
+        result = inspect_phone(ip, allowed_cidrs=cidrs, username=username, password=password,
+                               expected_urls=expected, certificate_sha256=setting("YEALINK_CERT_SHA256") or None)
+    except YealinkSetupError as error:
+        alog("YEALINK_INSPECT_FAILED", "WARNING", ip=ip, code=error.code, user=owner)
+        return jsonify(ok=False, code=error.code, error=str(error)), 422
+    finally:
+        _yealink_inspect_lock.release()
+    return jsonify(ok=True, **result)
 
 
 @app.route("/recent_events")
@@ -1920,6 +2147,50 @@ def ping_once(ip: str):
         return None
 
 
+def expire_stuck_calls(now: float | None = None) -> bool:
+    """Один проход watchdog. Блокировка номера совпадает с обработчиком /event."""
+    now = time.time() if now is None else now
+
+    def is_stuck(phone: dict) -> bool:
+        started = phone.get("call_start")
+        return phone.get("state") in STUCK_STATES and started is not None and now - started > STUCK_TIMEOUT
+
+    with lock:
+        candidates = {number for phones in users_phones.values() for number, phone in phones.items()
+                      if is_stuck(phone)}
+        candidates.update(number for number, call in pending_calls.items()
+                          if "recover_until" in call and call["recover_until"] <= now)
+        for key, ids in list(closed_call_ids.items()):
+            remaining = {call_id: expires for call_id, expires in ids.items() if expires > now}
+            if remaining:
+                closed_call_ids[key] = remaining
+            else:
+                del closed_call_ids[key]
+
+    changed = False
+    for number in candidates:
+        with number_lock(number), lock:
+            call = _pending_call(number, now)
+            for username, phones in users_phones.items():
+                phone = phones.get(number)
+                if phone is None or not is_stuck(phone):
+                    continue
+                rest = rest_state(number)
+                state = phone["state"]
+                alog("STATE_TIMEOUT", "WARNING", number=number, user=username, state=state,
+                     stuck_seconds=int(now - phone["call_start"]),
+                     msg=f"Состояние зависло >{STUCK_TIMEOUT}с, сброс в {rest}")
+                if call and call["username"] == username and "recover_until" not in call:
+                    call["recover_until"] = now + LATE_ANSWER_GRACE
+                    call["recover_state"] = state
+                flags = phone_flags.get(number, {})
+                flags.pop("line2", None)
+                flags["lines"] = 0
+                phone.update(state=rest, call_start=None, peer="", duration="00:00")
+                changed = True
+    return changed
+
+
 def ping_loop() -> None:
     # Увеличиваем число воркеров до 100 для масштабируемости.
     # Это позволяет обрабатывать сотни пингов одновременно, не блокируя мониторинг.
@@ -1927,30 +2198,11 @@ def ping_loop() -> None:
     
     while True:
         snapshot = []
-        now = time.time()
-        any_changed = False
+        any_changed = expire_stuck_calls()
         
         with lock:
             for username, phones in users_phones.items():
                 for number, phone in phones.items():
-                    # Очистка зависших состояний STUCK_STATES (таймаут 60 сек)
-                    if phone.get("state") in STUCK_STATES and phone.get("call_start"):
-                        if now - phone["call_start"] > 60:
-                            rest = rest_state(number)
-                            alog("STATE_TIMEOUT", "WARNING",
-                                 number=number, user=username,
-                                 state=phone["state"],
-                                 stuck_seconds=int(now - phone["call_start"]),
-                                 msg=f"Состояние зависло >60с, сброс в {rest}")
-                            flags = phone_flags.get(number, {})
-                            flags.pop("line2", None)
-                            flags["lines"] = 0
-                            phone["state"] = rest
-                            phone["call_start"] = None
-                            phone["peer"] = ""
-                            phone["duration"] = "00:00"
-                            any_changed = True
-                    
                     ip_addr = phone.get("ip", "").strip()
                     if ip_addr:
                         snapshot.append((username, number, ip_addr))
