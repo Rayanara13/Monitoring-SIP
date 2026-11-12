@@ -64,7 +64,7 @@ namespace IneiSetup
                 Port = installed == null ? 8000 : installed.Port,
                 Autostart = installed != null && installed.Autostart,
                 Desktop = installed != null && installed.Desktop,
-                Firewall = installed != null && installed.Firewall,
+                Firewall = installed == null || installed.Firewall,
             };
             removing = uninstall && installed != null;
             Text = "Установка Инея " + version;
@@ -218,7 +218,11 @@ namespace IneiSetup
                     {
                         Paragraph("При обслуживании используются каталоги обнаруженной установки.", true);
                     }
-                    else if (migrate) previous = DirectoryField("Папка прежней установки Rel 1.0 или 1.4.x", options.PreviousData);
+                    else if (migrate)
+                    {
+                        previous = DirectoryField("Папка прежней установки Rel 1.0 или 1.4.x", options.PreviousData);
+                        Paragraph("Перед переносом остановите прежний Иней.", true);
+                    }
                     Paragraph("Папки программы и рабочих данных выбираются отдельно.", true);
                     break;
                 case 3:

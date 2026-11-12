@@ -1,18 +1,18 @@
-# Иней 1.5 Preview
+# Иней 1.5 Preview 2
 
 by Стёпчик
 
 Мониторинг SIP-телефонов Yealink и история звонков в браузере. Статусы обновляются в открытых вкладках, а размер и порядок карточек сохраняются на сервере.
 
-## Скачать Иней 1.5 Preview
+## Скачать Иней 1.5 Preview 2
 
 | Комплект | Размер |
 | --- | ---: |
-| [Windows x64 — установщик EXE](https://github.com/Rayanara13/Monitoring-SIP/releases/download/v1.5-preview/Inei_1.5_preview_windows_x64_Setup.exe) | 16,55 МБ |
+| [Windows x64 — установщик EXE](https://github.com/Rayanara13/Monitoring-SIP/releases/download/v1.5-preview.2/Inei_1.5_preview2_windows_x64_Setup.exe) | 16,55 МБ |
 | [Linux x64 — ZIP](https://github.com/Rayanara13/Monitoring-SIP/releases/download/v1.5-preview/MonitoringSIP_1.5_offline_linux_x64_27d58b3.zip) | 22,52 МБ |
 | [Linux ARM64 — ZIP](https://github.com/Rayanara13/Monitoring-SIP/releases/download/v1.5-preview/MonitoringSIP_1.5_offline_linux_arm64_27d58b3.zip) | 18,84 МБ |
 
-Это предварительная сборка для тестирования. Условия лицензии в установщике черновые. [SHA-256 файлов](https://github.com/Rayanara13/Monitoring-SIP/releases/download/v1.5-preview/SHA256SUMS.txt).
+Это предварительная сборка для тестирования. [Лицензия Инея](offline/installer/license.txt). [SHA-256 Windows](https://github.com/Rayanara13/Monitoring-SIP/releases/download/v1.5-preview.2/SHA256SUMS.txt) · [SHA-256 Linux](https://github.com/Rayanara13/Monitoring-SIP/releases/download/v1.5-preview/SHA256SUMS.txt).
 
 ## Установка без интернета
 
@@ -22,7 +22,7 @@ by Стёпчик
 2. Выберите папки программы и рабочих данных. Для переноса с Rel 1.0 или 1.4.x сначала остановите прежний сервер, затем укажите папку его установки в мастере. Мастер покажет путь резервной копии.
 3. Откройте панель по адресу, указанному мастером. По умолчанию это «http://localhost:8000». При чистой установке пароль пользователя `admin` появится в `users_data/first-start.txt` в выбранной папке данных. Файл удаляется после первого успешного входа.
 
-Установщик включает Python и зависимости. Автозапуск включается при входе в Windows. Для восстановления, обновления и удаления снова откройте установщик.
+Установщик включает Python и зависимости. При новой установке входящие подключения на выбранный порт разрешены по умолчанию для частной сети. Автозапуск включается при входе в Windows. Для восстановления, обновления и удаления снова откройте установщик.
 
 ### Linux
 

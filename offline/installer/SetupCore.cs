@@ -172,8 +172,19 @@ namespace IneiSetup
             if (programDrive.AvailableFreeSpace < programNeed || dataDrive.AvailableFreeSpace < dataBytes)
                 throw new IOException("Недостаточно свободного места для комплекта и резервной копии.");
             CheckPort(options.Port);
-            if (options.PreviousData != null && ReadPort(options.PreviousData) != options.Port)
-                CheckPort(ReadPort(options.PreviousData));
+            if (sourceIsDestination)
+            {
+                int previousPort = ReadPort(options.PreviousData);
+                if (previousPort != options.Port)
+                {
+                    try { CheckPort(previousPort); }
+                    catch (IOException)
+                    {
+                        throw new IOException("Перед обновлением этой папки данных освободите прежний TCP-порт " +
+                            previousPort + ". Остановите прежний Иней, если он ещё запущен.");
+                    }
+                }
+            }
             return new InstallPlan { Options = options, ExistingProgram = existingProgram, ExistingData = existingData,
                 ProgramBackup = existingProgram ? BackupName(options.ProgramDirectory) : null,
                 DataBackup = options.PreviousData != null || existingData ? BackupName(options.DataDirectory) : null,

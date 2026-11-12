@@ -8,7 +8,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not $License) { $License = Join-Path $PSScriptRoot 'license-draft.txt' }
+if (-not $License) { $License = Join-Path $PSScriptRoot 'license.txt' }
 $KitZip = (Resolve-Path -LiteralPath $KitZip).ProviderPath
 $License = (Resolve-Path -LiteralPath $License).ProviderPath
 $Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)

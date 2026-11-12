@@ -28,11 +28,14 @@ namespace IneiSetup
         {
             string root = Path.Combine(Path.GetTempPath(), "Inei setup тест " + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
+            var legacyListener = new TcpListener(IPAddress.Loopback, 0);
             try
             {
                 string old = Path.Combine(root, "Старая установка");
                 string program = Path.Combine(root, "Программа с пробелом");
                 string data = Path.Combine(root, "Рабочие данные");
+                legacyListener.Start();
+                int legacyPort = ((IPEndPoint)legacyListener.LocalEndpoint).Port;
                 int port = FreePort();
                 Directory.CreateDirectory(Path.Combine(old, "users_data", ".managed-release"));
                 Directory.CreateDirectory(data); // A user may select an existing empty folder.
@@ -40,7 +43,8 @@ namespace IneiSetup
                 File.WriteAllText(Path.Combine(old, "phones.json"), "fixture phone bytes");
                 File.WriteAllText(Path.Combine(old, "users_data", "call_history.db"), "fixture history bytes");
                 File.WriteAllText(Path.Combine(old, "users_data", ".managed-release", "active.json"), "legacy executable pointer");
-                File.WriteAllText(Path.Combine(old, ".env"), "MONITORING_SIP_PORT=" + port + "\nAPP_SECRET_KEY=fixture\n");
+                string legacyConfig = "MONITORING_SIP_PORT=" + legacyPort + "\nAPP_SECRET_KEY=fixture\n";
+                File.WriteAllText(Path.Combine(old, ".env"), legacyConfig);
                 var options = new InstallOptions { ProgramDirectory = program, DataDirectory = data, PreviousData = old, Port = port };
                 InstallPlan initial = SetupCore.Plan(options);
                 Assert(!Directory.Exists(program) && Directory.GetFileSystemEntries(data).Length == 0, "Preflight wrote to destination.");
@@ -52,11 +56,15 @@ namespace IneiSetup
                     Assert(!Directory.Exists(Path.Combine(data, "users_data", ".managed-release")), "Old executable pointer was restored.");
                     Assert(File.ReadAllText(Path.Combine(data, ".env")).Contains("MONITORING_SIP_ROLE=node"), "Public role must be node.");
                     Assert(File.ReadAllText(Path.Combine(data, ".env")).Contains("APP_SECRET_KEY=fixture"), "Existing config was lost.");
+                    Assert(SetupCore.ReadPort(data) == port, "The selected port was not written to the migrated config.");
                 });
                 Assert(File.Exists(Path.Combine(data, SetupCore.LicenseReceipt)), "Acceptance receipt missing.");
                 Assert(File.ReadAllText(Path.Combine(initial.DataBackup, "auth.json")) == "fixture auth bytes", "Backup was not verified.");
                 Assert(File.Exists(Path.Combine(old, "auth.json")), "Original installation was touched.");
-                Console.WriteLine("PASS offline payload, selected directories, migration and verified backup");
+                Assert(File.ReadAllText(Path.Combine(old, ".env")) == legacyConfig, "The original port config was changed.");
+                Assert(File.ReadAllText(Path.Combine(initial.DataBackup, ".env")) == legacyConfig, "The backup did not retain the original port.");
+                legacyListener.Stop();
+                Console.WriteLine("PASS offline migration to a different port while the old port is occupied, with verified backup");
 
                 options.PreviousData = null;
                 File.WriteAllText(Path.Combine(program, "previous-program.txt"), "keep");
@@ -135,7 +143,11 @@ namespace IneiSetup
                 return 0;
             }
             catch (Exception error) { Console.Error.WriteLine(error); return 1; }
-            finally { Directory.Delete(root, true); }
+            finally
+            {
+                legacyListener.Stop();
+                Directory.Delete(root, true);
+            }
         }
     }
 }
