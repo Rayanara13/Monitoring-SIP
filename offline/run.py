@@ -16,10 +16,12 @@ ROLE_KEY = "MONITORING_SIP_ROLE"
 
 
 def configure_first_start(env_path):
-    if ROLE_KEY in os.environ:
+    if ROLE_KEY in os.environ or os.environ.get("VICTORIA_ROLE_GRANT"):
+        return
+    if (env_path.parent / "victoria-role.json").exists():
         return
     existing = env_path.read_text() if env_path.exists() else None
-    if existing is not None and any(line.startswith(f"{ROLE_KEY}=") for line in existing.splitlines()):
+    if existing is not None and any(line.startswith((f"{ROLE_KEY}=", "VICTORIA_ROLE_GRANT=")) for line in existing.splitlines()):
         return
 
     prefix = "\n" if existing and not existing.endswith("\n") else ""

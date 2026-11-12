@@ -68,15 +68,15 @@
   <section class="card stack">
     <div class="row"><h1>Подключение узла</h1><span id="status" class="status">Загрузка…</span></div>
     <dl>
-      <dt>ID узла</dt><dd id="node-id">—</dd>
-      <dt>Адрес</dt><dd id="address">—</dd>
-      <dt>Резервный адрес</dt><dd id="fallback">—</dd>
-      <dt>Последний обмен</dt><dd id="last-sync">—</dd>
-      <dt>В очереди истории</dt><dd id="queue">—</dd>
+      <dt id="node-id-label">ID узла</dt><dd id="node-id">—</dd>
+      <dt id="address-label">Адрес</dt><dd id="address">—</dd>
+      <dt id="fallback-label">Резервный адрес</dt><dd id="fallback">—</dd>
+      <dt id="last-sync-label">Последний обмен</dt><dd id="last-sync">—</dd>
+      <dt id="queue-label">В очереди истории</dt><dd id="queue">—</dd>
     </dl>
     <p id="sync-error" class="status" hidden></p>
   </section>
-  <div class="columns">
+  <div id="connection-forms" class="columns">
     <form id="import" class="card stack">
       <h2>Файл подключения</h2>
       <label>Выберите приглашение<input type="file" name="invitation" accept=".json,application/json" required></label>
@@ -98,6 +98,7 @@ const apiRoot = '/api/federation/v1/node';
 const timeFormat = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'medium' });
 let busy = false;
 let refreshing = false;
+let reportMode = false;
 
 async function request(path, body) {
   const options = { cache: 'no-store', credentials: 'same-origin', headers: { Accept: 'application/json' } };
@@ -122,10 +123,20 @@ function notice(text, className = '') {
 }
 
 function render(data) {
-  const connected = data.enrolled && data.last_sync && !data.error && Date.now() / 1000 - data.last_sync < 60;
-  el('status').textContent = !data.configured ? 'Подключение не настроено' : data.error ? 'Сбой обмена' :
-    connected ? 'Подключён' : data.last_sync ? 'Нет свежего обмена' : 'Ожидает обмена';
+  reportMode = data.mode === 'report';
+  const connected = (reportMode || data.enrolled) && data.last_sync && !data.error && Date.now() / 1000 - data.last_sync < 60;
+  el('status').textContent = reportMode
+    ? (data.error ? 'Сбой отправки' : connected ? 'Отчёты отправляются' :
+      data.last_sync ? 'Нет свежего отчёта' : 'Ожидает первого отчёта')
+    : (!data.configured ? 'Подключение не настроено' : data.error ? 'Сбой обмена' :
+      connected ? 'Подключён' : data.last_sync ? 'Нет свежего обмена' : 'Ожидает обмена');
   el('status').className = connected ? 'status good' : 'status';
+  for (const id of ['node-id', 'fallback', 'queue']) {
+    el(id).hidden = el(id + '-label').hidden = reportMode;
+  }
+  el('connection-forms').hidden = reportMode;
+  el('address-label').textContent = reportMode ? 'Куда отправляются отчёты' : 'Адрес';
+  el('last-sync-label').textContent = reportMode ? 'Последний успешный отчёт' : 'Последний обмен';
   el('node-id').textContent = data.node_id || '—';
   el('address').textContent = data.url || '—';
   el('fallback').textContent = data.fallback_url || '—';
@@ -156,7 +167,7 @@ function onSubmit(id, action, success) {
   const form = el(id);
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    if (busy) return;
+    if (busy || reportMode) return;
     busy = true;
     const button = form.querySelector('button');
     button.disabled = true;

@@ -156,6 +156,58 @@ class PingFirewallTests(unittest.TestCase):
             self.assertEqual(enabled, {firewall.TIMER, firewall.SERVICE})
             self.assertTrue(running)
 
+    def test_ownership_accepts_142_and_astra_but_rejects_foreign_or_ambiguous(self):
+        marker = firewall.MARKER + "e" * 64
+        table = {"family": "inet", "name": firewall.TABLE}
+        rule = {"family": "inet", "table": firewall.TABLE, "chain": "input", "comment": marker}
+
+        current = []
+
+        def run(*args):
+            items = [{"table": table}] if args[-1] == "tables" else current
+            return SimpleNamespace(stdout=json.dumps({"nftables": items}))
+
+        with patch.object(firewall, "_run", run):
+            current[:] = [{"table": {**table, "comment": marker}}]
+            self.assertEqual(firewall._current_marker(), marker)
+            current[:] = [{"table": table}, {"rule": rule}]
+            self.assertEqual(firewall._current_marker(), marker)
+            for foreign in ([{"table": table}], [{"table": table}, {"rule": {**rule, "chain": "output"}}],
+                            [{"table": {**table, "comment": marker}}, {"rule": rule}]):
+                current[:] = foreign
+                with self.assertRaises(firewall.FirewallError):
+                    firewall._current_marker()
+
+    def test_astra_upgrade_keeps_local_network_after_dynamic_revocation(self):
+        self.state.mkdir(mode=0o700)
+        (self.state / "settings.json").write_text(json.dumps({"path": str(self.source)}))
+        snapshot = self.state / "rules.nft"
+        snapshot.write_text('''table inet inei_ping {
+    chain input {
+        type filter hook input priority -10; policy accept;
+        iifname != "lo" ip saddr != 198.18.0.0/24 ip saddr != @trusted4 icmp type echo-request counter drop comment "inei-ping-v1:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+}
+''')
+        self.source.write_text('{"addresses":["198.19.0.2"]}')
+        with patch.object(firewall, "STATE_DIR", self.state), patch.object(firewall, "_native_nft_only"), \
+                patch.object(firewall, "_current_marker", return_value=None), \
+                patch.object(firewall, "_install_units"), patch.object(firewall, "_run"):
+            firewall._install(self.directory, None, dry_run=False)
+            self.assertEqual(json.loads((self.state / "settings.json").read_text())["trusted_ipv4_network"],
+                             "198.18.0.0/24")
+            self.assertIn("198.19.0.2", snapshot.read_text())
+            self.source.write_text('{"addresses":[]}')
+            firewall._refresh()
+            self.assertIn("ip saddr != 198.18.0.0/24 ip saddr != @trusted4", snapshot.read_text())
+            self.assertNotIn("198.19.0.2", snapshot.read_text())
+
+            (self.state / "settings.json").write_text(json.dumps({"path": str(self.source)}))
+            snapshot.unlink()
+            snapshot.symlink_to(self.source)
+            with self.assertRaises(firewall.FirewallError):
+                firewall._refresh()
+
 
 if __name__ == "__main__":
     unittest.main()

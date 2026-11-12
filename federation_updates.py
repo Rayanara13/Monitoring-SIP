@@ -21,6 +21,7 @@ from typing import BinaryIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from zipfile import BadZipFile, ZipFile
 
 
 MAX_PACKAGE_BYTES = 512 * 1024 * 1024
@@ -31,6 +32,9 @@ _IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}")
 _VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .+_-]{0,63}")
 _FIELDS = {"version", "platform", "arch", "sha256", "size"}
 _TARGETS = {("linux", "x86_64"), ("linux", "aarch64"), ("windows", "x86_64")}
+_USB_VICTORIA_TARGETS = {("victoria", "linux", arch) for arch in ("aarch64", "x86_64")}
+_USB_TARGETS = {("node", *target) for target in _TARGETS} | _USB_VICTORIA_TARGETS
+_KIT_PROFILES = {"node": b"public_node\n", "victoria": b"internal_victoria\n"}
 _RECEIPT_CODES = {
     "installing": {"started"}, "staged": {"local_executor_not_configured"},
     "applied": {"executor_succeeded"}, "failed": {"executor_start_failed", "executor_failed"},
@@ -102,6 +106,56 @@ def canonical_manifest(value: bytes | str | dict) -> bytes:
     return _json_bytes(value)
 
 
+def canonical_usb_manifest(value: bytes | str | dict) -> bytes:
+    """Канонический список полных комплектов одного подписанного выпуска."""
+    code = "invalid_usb_manifest"
+    message = "Некорректный манифест выпуска."
+    if isinstance(value, (bytes, str)):
+        try:
+            raw = value.encode("utf-8") if isinstance(value, str) else value
+            if len(raw) > MAX_MANIFEST_BYTES:
+                raise ValueError
+            value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_fields)
+        except (UnicodeError, ValueError, RecursionError):
+            raise UpdateError(code, message) from None
+    if not isinstance(value, dict) or set(value) != {"version", "release_version", "packages"}:
+        raise UpdateError(code, message)
+    version, release, packages = (value[key] for key in ("version", "release_version", "packages"))
+    if (type(version) is not int or version != 1 or not isinstance(release, str)
+            or not _VERSION.fullmatch(release) or release != release.strip()
+            or not isinstance(packages, list) or not 2 <= len(packages) <= 4):
+        raise UpdateError(code, message)
+    targets, ids = [], set()
+    for package in packages:
+        fields = ("role", "platform", "arch", "package_id")
+        if (not isinstance(package, dict) or set(package) != set(fields)
+                or not all(isinstance(package[key], str) for key in fields)):
+            raise UpdateError(code, message)
+        role, system, arch, package_id = (package[key] for key in fields)
+        target = (role, system, arch)
+        if target not in _USB_TARGETS or not _SHA256.fullmatch(package_id) or package_id in ids:
+            raise UpdateError(code, message)
+        targets.append(target)
+        ids.add(package_id)
+    if targets != sorted(set(targets)) or len(_USB_VICTORIA_TARGETS.intersection(targets)) != 1:
+        raise UpdateError(code, message)
+    return _json_bytes(value)
+
+
+def verify_kit_profile(source: Path | BinaryIO, role: str) -> None:
+    """Сверить профиль полного ZIP с назначением в подписанном выпуске."""
+    expected = _KIT_PROFILES.get(role)
+    if expected is not None:
+        try:
+            with ZipFile(source) as archive:
+                markers = [entry for entry in archive.infolist() if entry.filename == "MonitoringSIP/PROFILE.txt"]
+                if len(markers) == 1 and markers[0].file_size == len(expected) and archive.read(markers[0]) == expected:
+                    return
+        except (BadZipFile, OSError, RuntimeError, NotImplementedError):
+            pass
+    raise UpdateError("invalid_kit_profile", "Профиль комплекта не совпадает с назначением в манифесте.")
+
+
 def _signature(value: bytes | str) -> bytes:
     raw = _decode_url64(value, 64, "invalid_signature") if isinstance(value, str) else value
     if not isinstance(raw, bytes) or len(raw) != 64:
@@ -152,7 +206,15 @@ def _write_receipt(path: Path, content: dict) -> None:
             stream.write(_json_bytes(content))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        for attempt in range(10):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as error:
+                # Readers of active.json can deny replacement while their Windows handle is open.
+                if os.name != "nt" or getattr(error, "winerror", None) not in {5, 32, 33} or attempt == 9:
+                    raise
+                time.sleep(0.05)
         _sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
@@ -490,3 +552,13 @@ def execute_update(command: dict, link: dict, data_dir: Path | str, *, public_ke
             return {"package_id": package.id, "version": package.manifest["version"],
                     "status": "uncertain", "code": "executor_result_not_recorded"}
         return result
+
+
+if __name__ == "__main__":
+    try:
+        from federation_update_signing import main
+    except ModuleNotFoundError as error:
+        if error.name != "federation_update_signing":
+            raise
+        raise SystemExit("Прямой запуск этого модуля недоступен в данном комплекте.") from None
+    main()

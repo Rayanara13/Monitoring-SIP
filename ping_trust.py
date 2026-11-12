@@ -68,37 +68,57 @@ def read_trust_snapshot(value):
 class PingTrustFile:
     """Publish complete, bounded local data without running firewall commands."""
 
-    def __init__(self, path):
+    def __init__(self, path, *, defer=False):
         self.path = Path(path)
         self._lock = threading.Lock()
+        self._defer = defer
+        self._pending = None
 
     def publish(self, addresses):
         policy = {'addresses': trust_snapshot(addresses)['addresses']}
         data = (json.dumps(policy, separators=(',', ':')) + '\n').encode('ascii')
         with self._lock:
-            temporary = None
-            try:
-                try:
-                    info = self.path.lstat()
-                    if stat.S_ISREG(info.st_mode) and info.st_size == len(data):
-                        with self.path.open('rb') as current:
-                            if current.read(len(data) + 1) == data:
-                                return True
-                except FileNotFoundError:
-                    pass
-                with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix='.ping-trust-', delete=False) as output:
-                    temporary = Path(output.name)
-                    output.write(data)
-                    output.flush()
-                    os.fsync(output.fileno())
-                os.replace(temporary, self.path)
+            if self._defer:
+                self._pending = data
                 return True
-            except OSError as error:
-                LOG.warning('Не удалось обновить файл доверенных IP: %s', error)
-                return False
-            finally:
-                if temporary is not None:
-                    try:
-                        temporary.unlink(missing_ok=True)
-                    except OSError as error:
-                        LOG.warning('Не удалось удалить временный файл доверенных IP: %s', error)
+            self._pending = None
+            return self._write(data)
+
+    def activate(self):
+        """Apply the startup snapshot after the application has been admitted."""
+        with self._lock:
+            self._defer = False
+            if self._pending is None:
+                return True
+            if self._write(self._pending):
+                self._pending = None
+                return True
+            return False
+
+    def _write(self, data):
+        temporary = None
+        try:
+            try:
+                info = self.path.lstat()
+                if stat.S_ISREG(info.st_mode) and info.st_size == len(data):
+                    with self.path.open('rb') as current:
+                        if current.read(len(data) + 1) == data:
+                            return True
+            except FileNotFoundError:
+                pass
+            with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix='.ping-trust-', delete=False) as output:
+                temporary = Path(output.name)
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, self.path)
+            return True
+        except OSError as error:
+            LOG.warning('Не удалось обновить файл доверенных IP: %s', error)
+            return False
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError as error:
+                    LOG.warning('Не удалось удалить временный файл доверенных IP: %s', error)

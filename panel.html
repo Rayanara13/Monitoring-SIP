@@ -384,6 +384,11 @@ body {
   font-style: italic;
 }
 
+.remote-section-head { cursor: default; flex-wrap: wrap; }
+.remote-section-head h2 { margin: 0; }
+.remote-section-notice { padding: 12px 16px 0; }
+#remote-phone-picker select { width: 100%; min-width: 0; }
+
 /* ─── PHONE CARD ─── */
 .card {
   position: relative;
@@ -977,6 +982,16 @@ dialog::backdrop { background: #030810bf; }
       <div id="monitor-notice" role="status"></div>
       <div id="card-status" class="form-status" role="status" hidden></div>
       <div id="sections-wrap"><div class="section-empty">Загрузка телефонов…</div></div>
+      <section class="section" id="remote-phones" aria-labelledby="remote-phones-title" hidden>
+        <div class="section-head remote-section-head">
+          <h2 class="section-title" id="remote-phones-title">Телефоны узлов</h2>
+          <span class="section-cnt" id="remote-phones-count">0</span>
+          <button class="btn btn-ghost btn-sm" type="button" onclick="openRemotePhonePicker()">Закрепить телефон</button>
+        </div>
+        <div id="remote-phones-status" class="form-status remote-section-notice" role="status" hidden></div>
+        <div class="section-empty" id="remote-phones-empty">Загрузка телефонов узлов…</div>
+        <div class="section-body" id="remote-phones-grid" onclick="handleRemotePhoneClick(event)" hidden></div>
+      </section>
     </div>
 
     <!-- ── LIBRARY ── -->
@@ -1046,11 +1061,11 @@ dialog::backdrop { background: #030810bf; }
         </div>
         <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
           <div style="display:flex;gap:10px">
-            <input class="modal-inp" id="reg-username" placeholder="Логин (минимум 3 символа)" style="flex:1">
+            <input class="modal-inp" id="reg-username" placeholder="Логин (3–64 символа)" maxlength="64" style="flex:1">
             <button class="btn btn-primary" onclick="registerUser()">Создать</button>
           </div>
           <div class="reg-result" id="reg-result">
-            <div style="color:var(--green);font-weight:700;margin-bottom:8px">✓ Пользователь создан</div>
+            <div id="res-title" style="color:var(--green);font-weight:700;margin-bottom:8px"></div>
             <div style="font-size:13px;margin-bottom:4px">Логин: <strong id="res-login"></strong></div>
             <div style="font-size:13px">Пароль: <span class="reg-password" id="res-password"></span></div>
             <div class="reg-warn">⚠ Пароль показывается только один раз. Сохраните его.</div>
@@ -1059,7 +1074,7 @@ dialog::backdrop { background: #030810bf; }
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Логин</th><th>Создан</th><th>Ключ событий</th></tr></thead>
+          <thead><tr><th>Логин</th><th>Создан</th><th>Ключ событий</th><th>Действия</th></tr></thead>
           <tbody id="users-list"></tbody>
         </table>
       </div>
@@ -1197,6 +1212,21 @@ dialog::backdrop { background: #030810bf; }
   </form>
 </dialog>
 
+<dialog class="modal" id="remote-phone-picker" aria-labelledby="remote-phone-picker-title">
+  <form onsubmit="pinRemotePhone(event)">
+    <div class="modal-head"><div class="modal-title" id="remote-phone-picker-title">Закрепить телефон узла</div></div>
+    <div class="modal-body">
+      <label>Узел<select class="filter-sel" id="remote-picker-node" onchange="loadRemotePhoneOptions()" required disabled></select></label>
+      <label>Телефон<select class="filter-sel" id="remote-picker-phone" onchange="updateRemotePickerSubmit()" required disabled></select></label>
+      <div id="remote-picker-status" class="form-status" role="status" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" type="button" onclick="$('remote-phone-picker').close()">Отмена</button>
+      <button class="btn btn-primary" id="remote-picker-submit" type="submit" disabled>Закрепить</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog class="modal" id="about" aria-labelledby="about-title">
   <div class="modal-head"><div class="modal-title" id="about-title">Иней</div></div>
   <div class="modal-body">
@@ -1289,6 +1319,230 @@ function flagsHtml(p) {
 function lastEventTitle(p) {
   const f = p.flags || {};
   return f.last_event ? `Последнее событие: ${f.last_event} · ${f.last_event_time}` : '';
+}
+
+// ── Закреплённые телефоны узлов ──────────────────────────────────
+const remoteApi = '/api/federation/v1/admin';
+const remoteCardsPath = '/monitoring-cards';
+const remotePhoneErrors = {
+  unknown_node: 'Узел больше недоступен.',
+  unknown_card: 'Телефона больше нет в отчёте узла.',
+  node_inactive: 'Узел больше не передаёт данные.',
+  monitoring_card_limit: 'Достигнут предел числа закреплённых телефонов.',
+};
+let remotePhones = [];
+let remotePhonesRequest = null;
+let remotePhonesBusy = false;
+let remotePickerRequest = 0;
+
+function isVictoriaAdmin() {
+  return currentUserInfo?.server_role === 'victoria' && currentUserInfo.is_admin === true;
+}
+
+function remoteMonitoringVisible() {
+  return isVictoriaAdmin() && !document.hidden && $('pane-monitoring').classList.contains('active');
+}
+
+async function remotePhoneRequest(path, options = {}, controller = new AbortController()) {
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(remoteApi + path, {...options, signal: controller.signal, cache: 'no-store'});
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || data.ok === false) {
+      const error = new Error(remotePhoneErrors[data?.error] || 'Не удалось получить данные о телефонах узлов.');
+      error.status = res.status;
+      throw error;
+    }
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function remotePhoneStatus(id, message = '') {
+  const notice = $(id);
+  notice.textContent = message;
+  notice.hidden = !message;
+}
+
+function remoteNodeLabel(name, ip) {
+  return name && ip && name !== ip ? `${name} · ${ip}` : (name || ip || 'Узел');
+}
+
+function remotePhoneMarkup(pin, outdated) {
+  const phone = pin.phone || {};
+  const stale = outdated || pin.stale || !pin.phone;
+  const number = phone.full_number || phone.number || '—';
+  const state = stale ? 'OFFLINE' : String(phone.state || '');
+  const status = stale ? (pin.phone ? 'Нет свежих данных' : 'Телефон недоступен') : prettyState(state);
+  const ping = stale ? '—' : String(phone.ping || '?');
+  const node = remoteNodeLabel(pin.node_name, pin.source_ip);
+  return `
+    <article class="card remote-phone-card ${stateClass(state)}">
+      <div class="card-inner">
+        <div class="card-top">
+          <div class="card-info">
+            <div class="card-name">${esc(phone.name || phone.number || 'Телефон')}</div>
+            <div class="card-meta" title="${esc(node)}">${esc(number)} · ${esc(node)}</div>
+          </div>
+          <div class="status-pill ${pillClass(state)}">${esc(status)}</div>
+        </div>
+        <div class="card-bottom">
+          <span class="card-ping ${stale ? 'ping-unknown' : pingClass(ping)}">${esc(ping)}</span>
+          <button type="button" class="btn btn-ghost btn-xs" data-remote-node="${esc(pin.node_id)}"
+                  data-remote-card="${esc(pin.card_id)}" aria-label="Открепить телефон ${esc(number)}">Открепить</button>
+        </div>
+      </div>
+    </article>`;
+}
+
+let remotePhonesMarkup = '';
+function renderRemotePhones(outdated = false) {
+  const grid = $('remote-phones-grid');
+  const markup = remotePhones.map(pin => remotePhoneMarkup(pin, outdated)).join('');
+  $('remote-phones-count').textContent = remotePhones.length;
+  $('remote-phones-empty').textContent = 'Пока нет закреплённых телефонов.';
+  $('remote-phones-empty').hidden = remotePhones.length > 0;
+  grid.hidden = !remotePhones.length;
+  if (markup === remotePhonesMarkup) return;
+  const focused = document.activeElement;
+  const restoreFocus = grid.contains(focused) && focused?.dataset.remoteNode;
+  remotePhonesMarkup = markup;
+  grid.innerHTML = markup;
+  if (restoreFocus) {
+    [...grid.querySelectorAll('button[data-remote-node]')].find(button =>
+      button.dataset.remoteNode === restoreFocus && button.dataset.remoteCard === focused.dataset.remoteCard
+    )?.focus({preventScroll: true});
+  }
+}
+
+async function refreshRemotePhones() {
+  if (!remoteMonitoringVisible() || remotePhonesRequest || remotePhonesBusy) return;
+  const request = new AbortController();
+  remotePhonesRequest = request;
+  try {
+    const data = await remotePhoneRequest(remoteCardsPath, {}, request);
+    if (remotePhonesRequest !== request || !remoteMonitoringVisible()) return;
+    if (!Array.isArray(data.cards)) throw new Error('Не удалось загрузить закреплённые телефоны.');
+    remotePhones = data.cards;
+    $('remote-phones').hidden = false;
+    remotePhoneStatus('remote-phones-status');
+    renderRemotePhones();
+  } catch (error) {
+    if (remotePhonesRequest !== request || !remoteMonitoringVisible()) return;
+    if ([401, 403].includes(error.status)) {
+      $('remote-phones').hidden = true;
+      return;
+    }
+    remotePhoneStatus('remote-phones-status', 'Не удалось обновить телефоны узлов.');
+    renderRemotePhones(true);
+  } finally {
+    if (remotePhonesRequest === request) remotePhonesRequest = null;
+  }
+}
+
+function remotePickerOptions(id, placeholder, options = []) {
+  const select = $(id);
+  select.replaceChildren(new Option(placeholder, ''), ...options.map(([name, key]) => new Option(name, key)));
+  select.disabled = !options.length;
+}
+
+function updateRemotePickerSubmit() {
+  $('remote-picker-submit').disabled = remotePhonesBusy || !$('remote-picker-node').value || !$('remote-picker-phone').value;
+}
+
+async function openRemotePhonePicker() {
+  const dialog = $('remote-phone-picker');
+  if (!isVictoriaAdmin() || dialog.open) return;
+  const request = ++remotePickerRequest;
+  remotePickerOptions('remote-picker-node', 'Загрузка узлов…');
+  remotePickerOptions('remote-picker-phone', 'Сначала выберите узел');
+  remotePhoneStatus('remote-picker-status');
+  updateRemotePickerSubmit();
+  dialog.showModal();
+  try {
+    const data = await remotePhoneRequest('/nodes');
+    if (request !== remotePickerRequest || !dialog.open) return;
+    const nodes = (data.nodes || []).filter(node => node.status === 'active');
+    remotePickerOptions('remote-picker-node', nodes.length ? 'Выберите узел' : 'Нет узлов с отчётами',
+      nodes.map(node => [remoteNodeLabel(node.name, node.source_ip), node.node_id]));
+    if (nodes.length) $('remote-picker-node').focus();
+  } catch (error) {
+    if (request !== remotePickerRequest || !dialog.open) return;
+    remotePickerOptions('remote-picker-node', 'Узлы не загружены');
+    remotePhoneStatus('remote-picker-status', error.message);
+  }
+}
+
+async function loadRemotePhoneOptions() {
+  const request = ++remotePickerRequest;
+  const node = $('remote-picker-node').value;
+  const dialog = $('remote-phone-picker');
+  const current = () => dialog.open && request === remotePickerRequest && $('remote-picker-node').value === node;
+  remotePickerOptions('remote-picker-phone', node ? 'Загрузка телефонов…' : 'Сначала выберите узел');
+  remotePhoneStatus('remote-picker-status');
+  updateRemotePickerSubmit();
+  if (!node || !isVictoriaAdmin()) return;
+  try {
+    const data = await remotePhoneRequest(`/nodes/${encodeURIComponent(node)}/snapshot`);
+    if (!current()) return;
+    const pinned = new Set(remotePhones.filter(pin => pin.node_id === node).map(pin => pin.card_id));
+    const phones = (data.snapshot?.phones || []).filter(phone => typeof phone.id === 'string' && phone.id && !pinned.has(phone.id));
+    remotePickerOptions('remote-picker-phone', phones.length ? 'Выберите телефон' : 'Нет незакреплённых телефонов',
+      phones.map(phone => [[phone.full_number || phone.number, phone.name, phone.owner].filter(Boolean).join(' · '), phone.id]));
+  } catch (error) {
+    if (!current()) return;
+    remotePickerOptions('remote-picker-phone', 'Телефоны не загружены');
+    remotePhoneStatus('remote-picker-status', error.message);
+  }
+}
+
+async function changeRemotePhones(path, options) {
+  if (!isVictoriaAdmin() || remotePhonesBusy) return false;
+  remotePhonesBusy = true;
+  remotePhonesRequest?.abort();
+  remotePhonesRequest = null;
+  updateRemotePickerSubmit();
+  try {
+    await remotePhoneRequest(path, options);
+    return true;
+  } finally {
+    remotePhonesBusy = false;
+    updateRemotePickerSubmit();
+  }
+}
+
+async function pinRemotePhone(event) {
+  event.preventDefault();
+  const dialog = $('remote-phone-picker');
+  const request = remotePickerRequest;
+  const node_id = $('remote-picker-node').value;
+  const card_id = $('remote-picker-phone').value;
+  if (!node_id || !card_id || !dialog.open) return;
+  try {
+    if (!await changeRemotePhones(remoteCardsPath, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({node_id, card_id}),
+    })) return;
+    if (dialog.open && request === remotePickerRequest) dialog.close();
+    await refreshRemotePhones();
+  } catch (error) {
+    if (dialog.open && request === remotePickerRequest) remotePhoneStatus('remote-picker-status', error.message);
+  }
+}
+
+async function handleRemotePhoneClick(event) {
+  const button = event.target.closest('button[data-remote-node]');
+  if (!button || remotePhonesBusy) return;
+  const node = encodeURIComponent(button.dataset.remoteNode);
+  const card = encodeURIComponent(button.dataset.remoteCard);
+  button.disabled = true;
+  try {
+    if (await changeRemotePhones(`${remoteCardsPath}/${node}/${card}`, {method: 'DELETE'})) await refreshRemotePhones();
+  } catch (error) {
+    remotePhoneStatus('remote-phones-status', error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ── Socket ──────────────────────────────────────────────────────
@@ -1859,7 +2113,10 @@ function switchTab(name) {
   const tab = $('tab-btn-' + name);
   tab.classList.add('active');
   tab.setAttribute('aria-current', 'page');
-  if (name === 'monitoring') updateCardSizes();
+  if (name === 'monitoring') {
+    updateCardSizes();
+    refreshRemotePhones();
+  }
   if (name === 'history')  loadHistory(true);
   if (name === 'library')  { loadLibrary(); loadSharedStatus(); }
   if (name === 'accounts') loadUsers();
@@ -2059,13 +2316,42 @@ async function loadUsers() {
   if (!res.ok) return;
   const d = await res.json();
   if (!d.ok) return;
-  $('users-list').innerHTML = d.users.map(u => `
+  $('users-list').innerHTML = d.users.map((u, index) => `
     <tr>
       <td>${esc(u.username)}</td>
       <td class="mono">${esc(u.created_at || '—')}</td>
       <td><span class="token-box">${esc(u.event_token || '—')}</span></td>
+      <td>${u.username === 'admin' ? '—' : `<button type="button" class="btn btn-ghost btn-sm" data-reset-user="${index}">Сбросить пароль</button>`}</td>
     </tr>`).join('');
+  for (const button of $('users-list').querySelectorAll('[data-reset-user]')) {
+    button.onclick = () => resetUserPassword(d.users[Number(button.dataset.resetUser)].username, button);
+  }
 }
+
+function showAccountPassword(title, username, password) {
+  $('res-title').textContent = title;
+  $('res-login').textContent = username;
+  $('res-password').textContent = password;
+  $('reg-result').classList.add('visible');
+}
+
+async function resetUserPassword(username, button) {
+  if (!confirm(`Сбросить пароль для ${username}? Активные сеансы пользователя завершатся.`)) return;
+  button.disabled = true;
+  try {
+    const res = await fetch('/admin/users/password', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username}),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'Сброс пароля завершился ошибкой.');
+    showAccountPassword('Пароль сброшен', username, data.password);
+  } catch (error) {
+    alert(error.message || 'Не удалось выполнить сброс пароля.');
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function registerUser() {
   const username = $('reg-username').value.trim();
   if (!username) return;
@@ -2075,9 +2361,7 @@ async function registerUser() {
   });
   const d = await res.json();
   if (d.ok) {
-    $('res-login').textContent = username;
-    $('res-password').textContent = d.password;
-    $('reg-result').classList.add('visible');
+    showAccountPassword('Пользователь создан', username, d.password);
     $('reg-username').value = '';
     loadUsers();
   } else { alert(d.error || 'Ошибка'); }
@@ -2597,13 +2881,23 @@ async function initUserInfo() {
     if (!res.ok) return;
     currentUserInfo = await res.json();
     $('nav-user').textContent = currentUserInfo.username;
+    if (currentUserInfo.server_role === 'victoria') {
+      document.title = 'Иней · Виктория';
+      $('site-name').textContent = 'Иней · Виктория';
+    }
     if (currentUserInfo.is_admin) {
       const federationLink = $('federation-link');
-      federationLink.hidden = currentUserInfo.server_role !== 'node';
+      federationLink.hidden = !['node', 'victoria'].includes(currentUserInfo.server_role);
+      if (currentUserInfo.server_role === 'victoria') federationLink.textContent = 'Инженерная панель';
       $('tab-btn-accounts').style.display = '';
       $('tab-btn-tests').style.display = '';
       $('hist-col-user').style.display = '';
       $('hist-user-wrap').style.display = '';
+      if (isVictoriaAdmin()) {
+        $('remote-phones').hidden = false;
+        refreshRemotePhones();
+        setInterval(refreshRemotePhones, 5000);
+      }
       if (currentUserInfo.server_role === 'node') {
         refreshNodeUpdate();
         setInterval(refreshNodeUpdate, 5000);
@@ -2618,7 +2912,10 @@ initUserInfo();
 initSocket();
 refreshLiveViews();
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) refreshLiveViews();
+  if (!document.hidden) {
+    refreshLiveViews();
+    refreshRemotePhones();
+  }
 });
 window.addEventListener('online', refreshLiveViews);
 setInterval(() => {

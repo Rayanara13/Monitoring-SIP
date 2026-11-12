@@ -1,6 +1,7 @@
 """Изоляция архива и настоящий перезапуск тестового процесса в офлайн-комплекте."""
 
 from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
@@ -13,6 +14,7 @@ import stat
 import subprocess
 import sys
 import time
+from threading import Event
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import cryptography
@@ -28,8 +30,29 @@ APP_FILES = ("release_install.py", "federation_updates.py")
 DATA_FILES = {
     ".env": b"MONITORING_SIP_ROLE=node\nTEST_SETTING=preserve\n",
     "auth.json": b'{"fixture":"keep existing auth"}',
+    "ping-trust.json": b'{"addresses":["192.0.2.17"]}',
     "users_data/phones_admin.json": b'[{"number":"9701","name":"Keep existing card"}]',
 }
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows readers can deny atomic replace")
+def test_release_receipt_waits_for_a_transient_windows_reader(tmp_path):
+    target = tmp_path / "active.json"
+    installer._write(target, {"id": "previous"})
+    starting = Event()
+
+    def update():
+        starting.set()
+        installer._write(target, {"id": "candidate"})
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with target.open("rb"):
+            pending = executor.submit(update)
+            assert starting.wait(2)
+            time.sleep(0.15)
+            assert not pending.done()
+        pending.result(timeout=2)
+    assert installer._read(target) == {"id": "candidate"}
 
 
 def worker_source(version, *, broken=False):
@@ -40,11 +63,12 @@ import os
 from pathlib import Path
 import sqlite3
 import time
-from release_install import PACKAGE_ENV, mark_ready
+from release_install import PACKAGE_ENV, mark_ready, wait_for_activation
 
 if {broken!r}:
     Path(".env").write_text("broken candidate")
     Path("auth.json").write_text("broken candidate")
+    Path("ping-trust.json").write_text('{{"addresses":["192.0.2.88"]}}')
     Path("users_data/phones_admin.json").write_text("broken candidate")
     Path("users_data/candidate-only.json").write_text("remove after rollback")
     with closing(sqlite3.connect("users_data/call_history.db")) as db, db:
@@ -58,6 +82,7 @@ with Path("worker-starts.jsonl").open("a", encoding="utf-8") as witness:
         "note": note.read_text(encoding="utf-8") if note.is_file() else None,
     }}) + "\\n")
 mark_ready("Rel 0.0" if {broken!r} else {version!r}, "node")
+wait_for_activation()
 while not Path("stop-test-worker").exists():
     time.sleep(0.05)
 """
@@ -236,6 +261,48 @@ def test_offline_supervisor_restarts_rolls_back_and_accepts_an_explicit_older_re
         assert not (state / "request.json").exists()
         assert not (state / "transaction.json").exists()
 
+        monkeypatch.setenv(installer.PACKAGE_ENV, older.id)
+        with pytest.raises(ValueError):
+            installer.queue_maintenance("write", "Rel 1.3.1", "node", path=".env", contents=b"invalid")
+        assert not (state / "request.json").exists()
+
+        def maintenance(action, **change):
+            queued = installer.queue_maintenance(action, "Rel 1.3.1", "node", **change)
+            assert queued["status"] == "running"
+            job_id = queued["job_id"]
+
+            result = wait_result(lambda: installer.maintenance_status(job_id))
+            assert result["package_id"] == older.id
+            assert not (state / "incoming" / f"{job_id}.bin").exists()
+            return result
+
+        note_path = "assets/fixture.txt"
+        written = maintenance("write", path=note_path, contents=b"test maintenance content")
+        assert written["status"] == "applied"
+        after_write = starts(data)[-1]
+        assert after_write["pid"] != observed[-1]["pid"]
+        assert after_write["version"] == "Rel 1.3.1" and after_write["note"] == "test maintenance content"
+        active_after_write = json.loads((state / "active.json").read_bytes())
+        assert active_after_write == {"id": written["job_id"], "package_id": older.id}
+
+        protected = maintenance("delete", path="server.py")
+        assert protected["status"] == "failed"
+        assert starts(data)[-1] == after_write
+        assert json.loads((state / "active.json").read_bytes()) == active_after_write
+
+        deleted = maintenance("delete", path=note_path)
+        assert deleted["status"] == "applied"
+        after_delete = starts(data)[-1]
+        assert after_delete["pid"] != after_write["pid"]
+        assert after_delete["note"] is None
+        active_after_delete = json.loads((state / "active.json").read_bytes())
+        assert active_after_delete == {"id": deleted["job_id"], "package_id": older.id}
+
+        restarted = maintenance("restart")
+        assert restarted["status"] == "applied"
+        assert starts(data)[-1]["pid"] != after_delete["pid"]
+        assert json.loads((state / "active.json").read_bytes()) == active_after_delete
+        assert_data_preserved(data, [(1,), (2,)])
     finally:
         # Останавливаем текущий тестовый worker через его собственный sentinel.
         (data / "stop-test-worker").touch()

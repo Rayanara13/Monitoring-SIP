@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file, session, redirect, url_for
+from flask import Flask, Response, request, jsonify, send_file, session, redirect, url_for
 from flask_socketio import SocketIO, join_room
 from flask import has_request_context
 import json
@@ -9,6 +9,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import ssl
 import os
 import logging
 import tempfile
@@ -20,21 +21,34 @@ from collections import deque
 from pathlib import Path
 from functools import wraps
 from datetime import timedelta, datetime
-from contextlib import closing
+from contextlib import ExitStack, closing
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 from uuid import uuid4
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 from federation_logs import FederationJournal, JournalError
 from federation_node import FederationError, NodeSync, init_node_tables, make_opener, queue_call, validate_endpoint
 
 app = Flask(__name__)
+# Сохраняем обработчик Flask до подключения Socket.IO и ProxyFix к панели.
+flask_dispatch = app.wsgi_app
 
 
 def redact_access_log(record):
     message = record.getMessage()
-    redacted = re.sub(r"(?i)([?&](?:token|event_token)=)[^&\s\"]*", r"\1[скрыто]", message)
+
+    def safe_query(match):
+        try:
+            states = urllib.parse.parse_qs(match.group(2), max_num_fields=64).get("state", [])
+        except ValueError:
+            states = []
+        if len(states) == 1 and states[0] in globals().get("EVENT_LABELS", {}):
+            return f"{match.group(1)}?state={states[0]}"
+        return f"{match.group(1)}?[скрыто]"
+
+    redacted = re.sub(r'(\b[A-Z]+ [^?\s\"]+)\?([^\s\"]*)', safe_query, message)
     if redacted != message:
         record.msg = redacted
         record.args = ()
@@ -62,10 +76,11 @@ socketio = SocketIO(
 
 # Меняется с каждым выпуском: открытые панели сравнивают её с запомненной
 # при первом подключении и предлагают перезагрузить страницу
-VERSION = "Rel 1.4.1"
+VERSION = "Rel 1.5"
 
 PHONES_DIR = Path("users_data")
 AUTH_FILE = Path("auth.json")
+FIRST_START_FILE = PHONES_DIR / "first-start.txt"
 ENV_FILE = Path(".env")
 BLOCKS_FILE = Path("users_data/login_blocks.json")
 DB_FILE = Path("users_data/call_history.db")
@@ -90,10 +105,40 @@ class _JSONLFormatter(logging.Formatter):
         return json.dumps(data, ensure_ascii=False, default=str)
 
 
+class _OperationalLogHandler(RotatingFileHandler):
+    DAY = 24 * 60 * 60
+    RETENTION_DAYS = 7
+
+    def __init__(self, filename, **options):
+        super().__init__(filename, **options)
+        modified = Path(self.baseFilename).stat().st_mtime
+        self.next_day = (int(modified // self.DAY) + 1) * self.DAY
+        self._prune(time.time())
+
+    def shouldRollover(self, record):
+        return record.created >= self.next_day or super().shouldRollover(record)
+
+    def doRollover(self):
+        super().doRollover()
+        now = time.time()
+        self.next_day = (int(now // self.DAY) + 1) * self.DAY
+        self._prune(now)
+
+    def _prune(self, now):
+        oldest_day = (int(now // self.DAY) - self.RETENTION_DAYS + 1) * self.DAY
+        for index in range(1, self.backupCount + 1):
+            archive = Path(f"{self.baseFilename}.{index}")
+            try:
+                if archive.stat().st_mtime < oldest_day:
+                    archive.unlink()
+            except OSError:
+                pass  # A viewer may have the archive open on Windows.
+
+
 _raw_logger = logging.getLogger("monitoring_sip")
 _raw_logger.setLevel(logging.DEBUG)
 _raw_logger.propagate = False
-_log_handler = RotatingFileHandler(
+_log_handler = _OperationalLogHandler(
     LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=24, encoding="utf-8"
 )
 _log_handler.setFormatter(_JSONLFormatter())
@@ -123,7 +168,7 @@ def alog(cat: str, level: str = "INFO", **fields) -> None:
 
 # ─── Активные WebSocket-клиенты ─────────────────────────────────────────────
 
-connected_sids: set[str] = set()
+connected_sids: dict[str, str] = {}
 _sids_lock = threading.Lock()
 _emit_lock = threading.Lock()
 _library_room = "shared-sets"
@@ -192,7 +237,7 @@ def is_event_rate_limited(ip: str) -> bool:
     return rec["count"] > EVENT_RATE_LIMIT
 
 API_AUTH_ROUTES = {"/phones", "/add_phone", "/update_phone", "/delete_phone", "/resize_phone",
-                   "/reorder", "/yealink/inspect"}
+                   "/reorder", "/yealink/inspect", "/admin/users/password"}
 
 
 def get_local_ip():
@@ -222,24 +267,151 @@ def setting(key: str, default: str = "") -> str:
     return os.environ.get(key, get_env_value(key, default))
 
 
-local_role = setting("MONITORING_SIP_ROLE", "standalone").strip().lower()
-if local_role not in {"standalone", "node", "slave"}:
-    raise ValueError("Недопустимая роль узла.")
-ROLE = "node" if local_role in {"node", "slave"} else "standalone"
-LISTEN_HOST = setting("MONITORING_SIP_HOST", "0.0.0.0")
-LISTEN_PORT = int(setting("MONITORING_SIP_PORT", "8000"))
+VICTORIA_URL = None
+VICTORIA_CERTIFICATE = setting("VICTORIA_TLS_CERT")
+grant_setting = setting("VICTORIA_ROLE_GRANT").strip()
+grant_path = Path(grant_setting or "victoria-role.json")
+if grant_setting or grant_path.exists():
+    authority_path = Path(__file__).resolve().with_name("victoria_role_authority.pem")
+    if not authority_path.is_file():
+        raise SystemExit("Для запуска Виктории требуется подписанное назначение.")
+    try:
+        from federation_identity import load_victoria_grant
+    except ModuleNotFoundError as error:
+        if error.name != "federation_identity":
+            raise
+        raise SystemExit("Для запуска Виктории требуется комплект Виктории.") from None
+
+    VICTORIA_URL = load_victoria_grant(
+        grant_path, authority_path, VICTORIA_CERTIFICATE,
+    )
+    ROLE = "victoria"
+else:
+    local_role = setting("MONITORING_SIP_ROLE", "standalone").strip().lower()
+    if local_role not in {"standalone", "node", "slave"}:
+        raise ValueError("Для запуска Виктории требуется подписанное назначение.")
+    ROLE = "node" if local_role in {"node", "slave"} else "standalone"
+
+BEHIND_PROXY = ROLE == "victoria" and setting("VICTORIA_BEHIND_PROXY") == "1"
+victoria_endpoint = urllib.parse.urlsplit(VICTORIA_URL or "")
+default_host = "127.0.0.1" if BEHIND_PROXY else victoria_endpoint.hostname or "0.0.0.0"
+default_port = (victoria_endpoint.port or 443) if VICTORIA_URL and not BEHIND_PROXY else 8000
+LISTEN_HOST = setting("MONITORING_SIP_HOST", default_host)
+LISTEN_PORT = int(setting("MONITORING_SIP_PORT", str(default_port)))
+default_event_port = "0" if BEHIND_PROXY else "8000"
+VICTORIA_EVENT_PORT = int(setting("VICTORIA_EVENT_PORT", default_event_port)) if ROLE == "victoria" else 0
+if not 0 <= VICTORIA_EVENT_PORT <= 65535:
+    raise ValueError("VICTORIA_EVENT_PORT должен быть в диапазоне 0–65535.")
+default_event_host = LISTEN_HOST
+if BEHIND_PROXY:
+    default_event_host = "::" if ":" in victoria_endpoint.hostname else "0.0.0.0"
+VICTORIA_EVENT_HOST = setting("VICTORIA_EVENT_HOST", default_event_host)
+_PHONE_HTTP = "inei.victoria_phone_http"
+_REPORT_HTTP = "inei.victoria_report_http"
+default_report_port = "0" if BEHIND_PROXY else "8500"
+VICTORIA_REPORT_PORT = int(setting("VICTORIA_REPORT_PORT", default_report_port)) if ROLE == "victoria" else 0
+if VICTORIA_REPORT_PORT and not 8500 <= VICTORIA_REPORT_PORT <= 8900:
+    raise ValueError("VICTORIA_REPORT_PORT должен быть 0 или в диапазоне 8500–8900.")
+VICTORIA_REPORT_HOST = setting("VICTORIA_REPORT_HOST", "0.0.0.0" if BEHIND_PROXY else LISTEN_HOST)
+
+
+def victoria_event_app(environ, start_response):
+    if environ.get("PATH_INFO") != "/event":
+        return Response(status=404)(environ, start_response)
+    if environ.get("REQUEST_METHOD") != "GET":
+        return Response(status=405, headers={"Allow": "GET"})(environ, start_response)
+    environ[_PHONE_HTTP] = True
+    return flask_dispatch(environ, start_response)
+
+
+def victoria_report_app(environ, start_response):
+    from telemetry_node import REPORT_PATH
+
+    if environ.get("PATH_INFO") != REPORT_PATH:
+        return Response(status=404)(environ, start_response)
+    if environ.get("REQUEST_METHOD") != "POST":
+        return Response(status=405, headers={"Allow": "POST"})(environ, start_response)
+    environ[_REPORT_HTTP] = True
+    return flask_dispatch(environ, start_response)
+
+
+if ROLE == "victoria":
+    socket_app = app.wsgi_app
+
+    def victoria_socket_tls(environ, start_response):
+        path = environ.get("PATH_INFO", "").rstrip("/")
+        if (path == "/socket.io" or path.startswith("/socket.io/")) and environ.get("wsgi.url_scheme") != "https":
+            return Response(status=403)(environ, start_response)
+        return socket_app(environ, start_response)
+
+    # Engine.IO requests bypass Flask's before_request hook.
+    app.wsgi_app = victoria_socket_tls
+if BEHIND_PROXY:
+    if not ipaddress.ip_address(LISTEN_HOST).is_loopback:
+        raise ValueError("За HTTPS-прокси Виктория должна слушать на loopback.")
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 journal = None
+admin_audit = None
+_diagnostic_lock = threading.Lock()
+_diagnostic_state = {"last_event_at": None, "event_error": None, "logging_ok": True}
 if ROLE != "standalone":
     try:
         journal = FederationJournal(PHONES_DIR / "federation_journal.db")
     except JournalError:
+        _diagnostic_state["logging_ok"] = False
         alog("FEDERATION_JOURNAL_UNAVAILABLE", "ERROR")
 
 
 def journal_record(kind, **fields):
-    if journal is not None:
-        journal.record(kind, **fields)
+    recorded = journal.record(kind, **fields) if journal is not None else None
+    with _diagnostic_lock:
+        if recorded is not None:
+            _diagnostic_state["logging_ok"] = recorded
+        if kind == "sip_event":
+            _diagnostic_state.update(last_event_at=time.time(), event_error=None)
+        elif kind == "sip_rejected":
+            _diagnostic_state["event_error"] = {
+                "bad_token": "invalid_token", "unknown_phone": "unknown_phone",
+                "unsupported_event": "invalid_event", "rate_limited": "rate_limited",
+            }.get(fields.get("reason"), "rejected")
+
+
+def diagnostic_loop(stop):
+    previous_identity = None
+    failed = False
+    while not stop.is_set():
+        try:
+            if ping_trust is not None:
+                ping_trust.activate()  # Retry a failed publication after startup.
+            with _diagnostic_lock:
+                state = {**_diagnostic_state, "schema": 1, "version": VERSION,
+                         "role": ROLE, "updated_at": time.time()}
+            identity = None
+            if report_sync is not None:
+                state.update(link_state="report_only", last_sync=report_sync.status()["last_sync"])
+            elif node_sync is not None:
+                link = node_sync.status()
+                status = (node_sync.last_error_code or ("registered" if link["enrolled"] else "unregistered")
+                          if link["configured"] else "unconfigured")
+                state.update(link_state=status, last_sync=link["last_sync"])
+                identity = node_sync.diagnostic_identity()
+            identity_file = PHONES_DIR / "diagnostic-link.json"
+            if identity is None:
+                identity_file.unlink(missing_ok=True)
+            elif identity != previous_identity or not identity_file.is_file():
+                write_local_json(identity_file, identity)
+            previous_identity = identity
+            write_local_json(PHONES_DIR / "diagnostic-status.json", state)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            if not failed:
+                alog("DIAGNOSTIC_SNAPSHOT_FAILED", "WARNING", error_type=type(error).__name__)
+            failed = True
+        else:
+            if failed:
+                alog("DIAGNOSTIC_SNAPSHOT_RECOVERED")
+            failed = False
+        stop.wait(15)
 
 
 # Куда дублировать GET-запросы (центральный сервер). Только из .env, без адреса
@@ -273,19 +445,19 @@ def before_request_func():
     if ROLE == "standalone" and request.method == "GET" and TARGET_IP and LOCAL_IP != TARGET_IP:
         duplicate_get_request(request.path, request.args.to_dict())
 
+    if (ROLE == "victoria" and not request.is_secure
+            and not (request.environ.get(_PHONE_HTTP) or request.environ.get(_REPORT_HTTP))):
+        return jsonify(ok=False, error="Виктория доступна через HTTPS."), 403
     origin = request.headers.get("Origin")
     if (request.method in {"POST", "PUT", "PATCH", "DELETE"}
             and origin is not None and origin != request.host_url.rstrip("/")):
         return jsonify(ok=False, error="Запрос с другого сайта."), 403
 
-    query = {key: value for key, value in request.args.items()
-             if key.lower() not in {"token", "event_token", "password"}}
     alog("HTTP_REQ",
          method=request.method,
-         path=request.path,
+         path=request.url_rule.rule if request.url_rule is not None else "unmatched",
          ip=get_client_ip(),
-         user=session.get("username"),
-         query=query or None)
+         user=session.get("username"))
 
 
 @app.errorhandler(Exception)
@@ -294,9 +466,10 @@ def handle_exception(e):
         return e
     journal_record("service_exception")
     alog("UNHANDLED_EXCEPTION", "ERROR",
-         error=str(e),
-         traceback=traceback.format_exc(),
-         path=request.path,
+         error_type=type(e).__name__,
+         frames=[{"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
+                 for frame in traceback.extract_tb(e.__traceback__)[-8:]],
+         path=request.url_rule.rule if request.url_rule is not None else "unmatched",
          method=request.method,
          ip=get_client_ip())
     return jsonify({"ok": False, "error": "Внутренняя ошибка сервера"}), 500
@@ -304,14 +477,15 @@ def handle_exception(e):
 
 @socketio.on("connect")
 def on_ws_connect():
-    username = authenticated_user()
-    if not username:
-        return False
-    join_room(f"phones:{username}")
-    join_room(_library_room)
-    with _sids_lock:
-        connected_sids.add(request.sid)
-        total = len(connected_sids)
+    with lock:
+        username = authenticated_user()
+        if not username or (ROLE == "victoria" and not request.is_secure):
+            return False
+        join_room(f"phones:{username}")
+        join_room(_library_room)
+        with _sids_lock:
+            connected_sids[request.sid] = username
+            total = len(connected_sids)
     alog("WS_CONNECT",
          sid=request.sid[:10],
          total_clients=total,
@@ -323,11 +497,25 @@ def on_ws_connect():
 @socketio.on("disconnect")
 def on_ws_disconnect():
     with _sids_lock:
-        connected_sids.discard(request.sid)
+        connected_sids.pop(request.sid, None)
         total = len(connected_sids)
     alog("WS_DISCONNECT",
          sid=request.sid[:10],
          total_clients=total)
+
+
+def write_json_atomic(path, data):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def load_or_create_auth() -> dict:
@@ -336,7 +524,7 @@ def load_or_create_auth() -> dict:
         # Преобразуем старый формат в новый, если нужно
         if isinstance(data, dict) and "username" in data:
             data = {data["username"]: data}
-            AUTH_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            write_json_atomic(AUTH_FILE, data)
         return data
 
     username = "admin"
@@ -352,17 +540,28 @@ def load_or_create_auth() -> dict:
     
     auth_data = {username: user_data}
 
-    with os.fdopen(os.open(AUTH_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
-                   "w", encoding="utf-8") as stream:
-        json.dump(auth_data, stream, indent=2, ensure_ascii=False)
+    descriptor = os.open(AUTH_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    temporary = None
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(auth_data, stream, indent=2, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=PHONES_DIR,
+                                         prefix=".first-start-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(f"Логин: {username}\nПароль: {password}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, FIRST_START_FILE)
+    except BaseException:
+        AUTH_FILE.unlink(missing_ok=True)
+        raise
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
-    print("=" * 70)
-    print("Создан файл auth.json")
-    print(f"Логин: {username}")
-    print(f"Пароль: {password}")
-    print(f"Токен для /event: {event_token}")
-    print("Сохрани эти данные. В auth.json хранится только хэш пароля.")
-    print("=" * 70)
+    print(f"Первый вход администратора: {FIRST_START_FILE.resolve()}", flush=True)
 
     return auth_data
 
@@ -387,6 +586,7 @@ app.secret_key = get_app_secret()
 app.permanent_session_lifetime = timedelta(hours=12)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = ROLE == "victoria"
 
 
 def is_api_route(path: str) -> bool:
@@ -395,7 +595,9 @@ def is_api_route(path: str) -> bool:
 
 def authenticated_user():
     username = session.get("username")
-    if session.get("logged_in") is True and isinstance(username, str) and username in AUTH:
+    account = AUTH.get(username) if isinstance(username, str) else None
+    if (session.get("logged_in") is True and account is not None
+            and session.get("password_generation") == account.get("password_generation")):
         return username
     return None
 
@@ -473,7 +675,7 @@ def init_db() -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ts    ON call_log(ts_start)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_local ON call_log(local)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_user  ON call_log(username)")
-    if ROLE == "node":
+    if ROLE == "node" and report_sync is None:
         init_node_tables(conn)
     conn.commit()
     conn.close()
@@ -489,7 +691,7 @@ def insert_call(ts_start: float, ts_end: float, duration: int,
                 " VALUES (?,?,?,?,?,?,?)",
                 (ts_start, ts_end, duration, local, remote, direction, username),
             )
-            if ROLE == "node":
+            if ROLE == "node" and report_sync is None:
                 phone = users_phones.get(username, {}).get(local, {})
                 queue_call(conn, ts_start, ts_end, duration, local, phone.get("name", local),
                            remote, direction, username)
@@ -637,20 +839,7 @@ def load_phones() -> None:
 def write_local_json(path, data):
     if path.resolve().parent != PHONES_DIR.resolve():
         raise ValueError("Неверный путь файла пользователя.")
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
-        temporary = Path(handle.name)
-        try:
-            json.dump(data, handle, indent=2, ensure_ascii=False)
-            handle.flush()
-            os.fsync(handle.fileno())
-        except BaseException:
-            handle.close()
-            temporary.unlink(missing_ok=True)
-            raise
-    try:
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, data)
 
 
 def write_cards(username, phones):
@@ -890,10 +1079,17 @@ def login_page():
             "error": f"Слишком много попыток. Повтори через {seconds_left} сек."
         }), 429
 
-    if username in AUTH and check_password_hash(AUTH[username]["password_hash"], password):
+    account = AUTH.get(username)
+    if account is not None and check_password_hash(account["password_hash"], password):
         session.permanent = True
         session["logged_in"] = True
         session["username"] = username
+        session["password_generation"] = account.get("password_generation")
+        if username == "admin":
+            try:
+                FIRST_START_FILE.unlink(missing_ok=True)
+            except OSError:
+                alog("FIRST_START_CLEANUP_FAILED", "WARNING")
         register_login_success(ip)
         journal_record("auth_result", outcome="success")
         alog("AUTH_LOGIN_OK", user=username, ip=ip)
@@ -907,6 +1103,13 @@ def login_page():
     return jsonify({"ok": False, "error": "Неверный логин или пароль"}), 401
 
 
+def record_account_action(action, username, outcome, *, code=None):
+    actor = session.get("username")
+    alog("ACCOUNT_ACTION", action=action, actor=actor, target=username, outcome=outcome, code=code)
+    if admin_audit is not None:
+        admin_audit.record(action, actor=actor, target_type="user", target=username, outcome=outcome, code=code)
+
+
 @app.route("/register", methods=["POST"])
 @login_required
 def register():
@@ -914,44 +1117,84 @@ def register():
     if session.get("username") != "admin":
         return jsonify({"ok": False, "error": "Доступ запрещен"}), 403
 
-    data = request.get_json(silent=True) or {}
-    username = str(data.get("username", "")).strip()
+    data = request.get_json(silent=True)
+    username = data.get("username") if isinstance(data, dict) else None
+    username = username.strip() if isinstance(username, str) else ""
+    if not re.fullmatch(r"[^\W_][\w.-]{2,63}", username) or username.endswith("."):
+        return jsonify(ok=False, error="Логин от 3 до 64 символов. Начните с буквы или цифры. "
+                       "Далее можно использовать буквы, цифры, точку, дефис и подчёркивание."), 400
 
-    if not username:
-        return jsonify({"ok": False, "error": "Введите логин"}), 400
-
-    if len(username) < 3:
-        return jsonify({"ok": False, "error": "Логин слишком короткий"}), 400
-
-    if username in AUTH:
-        return jsonify({"ok": False, "error": "Пользователь уже существует"}), 400
-
-    # Генерируем пароль автоматически
     password = secrets.token_urlsafe(10)
     event_token = secrets.token_hex(16)
-    
-    AUTH[username] = {
+    account = {
         "username": username,
         "password_hash": generate_password_hash(password),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "event_token": event_token
+        "event_token": event_token,
     }
-
-    AUTH_FILE.write_text(json.dumps(AUTH, indent=2, ensure_ascii=False), encoding="utf-8")
-    
-    # Создаем пустой файл телефонов для нового пользователя
     user_file = PHONES_DIR / f"phones_{username}.json"
-    if not user_file.exists():
-        user_file.write_text("[]", encoding="utf-8")
-    
     with lock:
+        if any(name.casefold() == username.casefold() for name in AUTH):
+            return jsonify(ok=False, error="Пользователь уже существует"), 409
+        created = False
+        try:
+            try:
+                with user_file.open("xb") as output:
+                    created = True
+                    output.write(b"[]")
+                    output.flush()
+                    os.fsync(output.fileno())
+            except FileExistsError:
+                # An interrupted registration may have left just its empty card file.
+                if (user_file.is_symlink() or not user_file.is_file() or user_file.stat().st_size != 2
+                        or user_file.read_bytes() != b"[]"):
+                    return jsonify(ok=False, error="Для этого логина уже существует файл карточек."), 409
+            write_json_atomic(AUTH_FILE, {**AUTH, username: account})
+        except OSError:
+            if created:
+                try:
+                    user_file.unlink(missing_ok=True)
+                except OSError:
+                    alog("ACCOUNT_CARD_CLEANUP_FAILED", "WARNING", target=username)
+            record_account_action("user.create", username, "failed", code="data_write_failed")
+            return jsonify(ok=False, error="Не удалось сохранить учётную запись. Проверьте права и место на диске."), 503
+        AUTH[username] = account
         users_phones[username] = {}
+    record_account_action("user.create", username, "applied")
+    return jsonify(ok=True, password=password, event_token=event_token)
 
-    return jsonify({
-        "ok": True, 
-        "password": password, 
-        "event_token": event_token
-    })
+
+@app.post("/admin/users/password")
+@login_required
+def reset_user_password():
+    if session.get("username") != "admin":
+        return jsonify(ok=False, error="Доступ запрещен"), 403
+    data = request.get_json(silent=True)
+    username = data.get("username") if isinstance(data, dict) else None
+    if not isinstance(username, str) or username == "admin":
+        return jsonify(ok=False, error="Выберите учётную запись оператора."), 400
+
+    with lock:
+        account = AUTH.get(username)
+        if account is None:
+            return jsonify(ok=False, error="Пользователь не найден."), 404
+        password = secrets.token_urlsafe(12)
+        updated = {**account, "password_hash": generate_password_hash(password),
+                   "password_generation": secrets.token_hex(16)}
+        try:
+            write_json_atomic(AUTH_FILE, {**AUTH, username: updated})
+        except OSError:
+            record_account_action("user.password.reset", username, "failed", code="data_write_failed")
+            return jsonify(ok=False, error="Не удалось сохранить новый пароль."), 503
+        AUTH[username] = updated
+        with _sids_lock:
+            sessions = [sid for sid, owner in connected_sids.items() if owner == username]
+    for sid in sessions:
+        socketio.server.disconnect(sid, namespace="/")
+    record_account_action("user.password.reset", username, "applied")
+    response = jsonify(ok=True, password=password)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/logout", methods=["POST"])
@@ -1786,7 +2029,7 @@ def action_url_catalog(username):
     aliases: dict[str, list[str]] = {}
     for old, new in LEGACY_STATES.items():
         aliases.setdefault(new, []).append(old)
-    return {
+    catalog = {
         "server_ip": LOCAL_IP,  # если панель открыта как localhost — телефонам нужен LAN-IP
         "phones": phones,
         "events": [
@@ -1795,6 +2038,11 @@ def action_url_catalog(username):
             for k, ru, en in ACTION_URL_EVENTS
         ],
     }
+    if VICTORIA_EVENT_PORT:
+        host = victoria_endpoint.hostname
+        authority = f"[{host}]" if ":" in host else host
+        catalog["event_origin"] = f"http://{authority}:{VICTORIA_EVENT_PORT}"
+    return catalog
 
 
 _yealink_inspect_lock = threading.Lock()
@@ -2587,44 +2835,73 @@ def execute_federation_command(command, link):
                     "username": owner, "number": number, "ip": card["ip"],
                 }))
                 return ("applied" if response.status_code < 400 else "failed"), response.get_json()
-        raise CardError("Неизвестная команда сервера.")
+        raise CardError("Неизвестная команда Виктории.")
     except CardError as error:
         return ("conflict" if error.status == 409 else "failed"), {"error": str(error)}
 
 
-node_sync = None
-if ROLE == "node":
+availability_probe = None
+ping_trust = None
+if ROLE in {"node", "victoria"}:
     from availability_probe import AvailabilityProbe
     from ping_trust import PingTrustFile
 
+    availability_probe = AvailabilityProbe(ROLE)
+    ping_trust = PingTrustFile(Path("ping-trust.json"), defer=__name__ == "__main__")
+
+def report_destination():
+    address = setting("FEDERATION_REPORT_IP").strip()
+    port = setting("FEDERATION_REPORT_PORT").strip()
+    if not address:
+        preset = Path(__file__).resolve().with_name("report-target.json")
+        if preset.is_file():
+            target = json.loads(preset.read_text(encoding="utf-8"))
+            address, port = target["host"], port or str(target.get("port", 8500))
+    return (address, int(port or 8500)) if address else None
+
+
+node_sync = None
+report_sync = None
+if ROLE == "node":
     poll_seconds = int(setting("FEDERATION_POLL_SECONDS", "5"))
     if not 1 <= poll_seconds <= 30:
         raise ValueError("FEDERATION_POLL_SECONDS должен быть от 1 до 30.")
-    master_ip = setting("FEDERATION_MASTER_IP").strip()
-    master_url = None
-    if master_ip:
-        address = ipaddress.ip_address(master_ip)
-        host = str(address) if address.version == 4 else f"[{address}]"
-        port = int(setting("FEDERATION_MASTER_PORT", "443"))
-        if not 1 <= port <= 65535:
-            raise ValueError("Неверный FEDERATION_MASTER_PORT.")
-        master_url = f"https://{host}:{port}" if port != 443 else f"https://{host}"
-    node_sync = NodeSync(DB_FILE, VERSION, federation_snapshot, execute_federation_command,
-                         interval=poll_seconds, master_url=master_url,
-                         availability_probe=AvailabilityProbe(ROLE),
-                         ping_trust=PingTrustFile(Path("ping-trust.json")),
-                         on_connection=lambda outcome: journal_record("federation_status", outcome=outcome))
+    def log_connection(outcome):
+        journal_record("federation_status", outcome=outcome)
+
+    destination = report_destination()
+    if destination:
+        from telemetry_node import TelemetryReporter
+
+        report_sync = TelemetryReporter(
+            *destination, VERSION, federation_snapshot, availability_probe,
+            interval=poll_seconds, on_connection=log_connection,
+        )
+    else:
+        master_ip = setting("FEDERATION_MASTER_IP").strip()
+        master_url = None
+        if master_ip:
+            address = ipaddress.ip_address(master_ip)
+            host = str(address) if address.version == 4 else f"[{address}]"
+            port = int(setting("FEDERATION_MASTER_PORT", "443"))
+            if not 1 <= port <= 65535:
+                raise ValueError("Неверный FEDERATION_MASTER_PORT.")
+            master_url = f"https://{host}:{port}" if port != 443 else f"https://{host}"
+        node_sync = NodeSync(DB_FILE, VERSION, federation_snapshot, execute_federation_command,
+                             interval=poll_seconds, master_url=master_url,
+                             availability_probe=availability_probe, ping_trust=ping_trust,
+                             on_connection=log_connection)
 
 
 @app.route("/federation")
 @app.route("/node-link")
 @login_required
 def federation_panel():
-    if ROLE == "standalone":
+    if ROLE == "standalone" or (ROLE == "victoria" and request.path == "/node-link"):
         return jsonify(ok=False, error="Подключение доступно на узле."), 404
     if not federation_admin():
         return jsonify(ok=False, error="Доступ запрещён."), 403
-    response = send_file("node_link.html")
+    response = send_file("federation.html" if ROLE == "victoria" else "node_link.html")
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -2632,10 +2909,14 @@ def federation_panel():
 @app.route("/api/federation/v1/node/link", methods=["GET", "POST"])
 @app.route("/api/federation/v1/node/address", methods=["POST"])
 def federation_node_settings():
-    if node_sync is None:
+    if node_sync is None and report_sync is None:
         return jsonify(ok=False, error="Доступно на узле."), 404
     if not federation_admin():
         return jsonify(ok=False, error="Доступ запрещён."), 403
+    if report_sync is not None:
+        if request.method == "GET":
+            return jsonify(report_sync.status())
+        return jsonify(ok=False, error="Адрес для отчётов задан в настройках узла."), 409
     if request.method == "GET":
         return jsonify(node_sync.status())
     if request.headers.get("Origin", request.host_url.rstrip("/")) != request.host_url.rstrip("/"):
@@ -2657,10 +2938,14 @@ def federation_node_settings():
 
 @app.route("/api/federation/v1/node/update", methods=["GET", "POST"])
 def federation_node_update():
-    if node_sync is None:
+    if node_sync is None and report_sync is None:
         return jsonify(ok=False, error="Доступно на узле."), 404
     if not federation_admin():
         return jsonify(ok=False, error="Доступ запрещён."), 403
+    if report_sync is not None:
+        if request.method == "GET":
+            return jsonify(ok=True, enabled=False)
+        return jsonify(ok=False, error="В режиме отчётов обновление выполняется локально."), 409
     from release_install import managed, update_public_key
 
     enabled = managed() and bool(update_public_key(Path(__file__).resolve().parent, Path.cwd()))
@@ -2681,31 +2966,118 @@ def federation_node_update():
     return response
 
 
+if ROLE == "victoria":
+    from federation_center import create_center_blueprint
+    from federation_logs import AdminAudit
+    from release_admin import create_server_admin_blueprint
+    from release_install import PACKAGE_ENV, managed, queue_update, update_public_key, update_result
+
+    tls_ca = Path(setting("VICTORIA_TLS_CA")).read_text(encoding="utf-8")
+    public_url = validate_endpoint(VICTORIA_URL, tls_ca)["url"]
+    update_key = update_public_key(Path(__file__).resolve().parent, Path.cwd())
+    packages = None
+    if update_key:
+        from federation_updates import PackageStore
+
+        packages = PackageStore(PHONES_DIR / "update_packages", update_key)
+    try:
+        admin_audit = AdminAudit(PHONES_DIR / "admin_audit.db")
+    except JournalError:
+        alog("ADMIN_AUDIT_UNAVAILABLE", "ERROR")
+    from availability_protocol import PRIVATE_NETWORKS
+
+    default_report_cidrs = ",".join(str(network) for network in PRIVATE_NETWORKS)
+    report_cidrs = tuple(ipaddress.ip_network(item.strip()) for item in
+                         setting("VICTORIA_REPORT_CIDRS", default_report_cidrs).split(",")
+                         if item.strip()) if VICTORIA_REPORT_PORT else ()
+    app.register_blueprint(create_center_blueprint(
+        PHONES_DIR, public_url, tls_ca, federation_admin, package_store=packages, journal=journal,
+        ping_trust=ping_trust, trusted_ping_ips=setting("VICTORIA_PING_TRUSTED_IPS").replace(",", " ").split(),
+        current_package=os.environ.get(PACKAGE_ENV) or None,
+        master_update=(lambda package, job_id: queue_update(package, job_id, ROLE)) if managed() else None,
+        master_update_status=update_result if managed() else None,
+        availability_probe=availability_probe, report_cidrs=report_cidrs,
+        audit=admin_audit, app_version=VERSION,
+    ))
+    app.register_blueprint(create_server_admin_blueprint(
+        Path(__file__).resolve().parent, VERSION, federation_admin, audit=admin_audit,
+    ))
+
+
 def main():
+    from release_install import mark_ready, wait_for_activation
+    from werkzeug.serving import make_server
+
+    kwargs = {}
+    if ROLE == "victoria" and not BEHIND_PROXY:
+        try:
+            key = setting("VICTORIA_TLS_KEY")
+            if not key:
+                raise ValueError("Укажите VICTORIA_TLS_KEY или настройте HTTPS-прокси.")
+            tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls.minimum_version = ssl.TLSVersion.TLSv1_2
+            tls.load_cert_chain(VICTORIA_CERTIFICATE, key)
+            kwargs["ssl_context"] = tls
+        except (OSError, ValueError) as error:
+            alog("TLS_CONFIG_FAILED", "ERROR", error_type=type(error).__name__)
+            raise
     alog("APP_START", version=VERSION, role=ROLE, log_file=str(LOG_FILE), db_file=str(DB_FILE),
          target_ip=(TARGET_IP or None) if ROLE == "standalone" else None)
     load_phones()
     init_db()
-    threading.Thread(target=ping_loop, daemon=True).start()
-    threading.Thread(target=cleanup_loop, daemon=True).start()
-    if node_sync:
-        node_sync.import_at_startup(setting("FEDERATION_INVITATION"))
-        node_sync.start()
-    journal_record("service_started")
-    alog("APP_READY", host=LISTEN_HOST, port=LISTEN_PORT, role=ROLE)
-    try:
-        if os.environ.get("INEI_UPDATE_READY"):
-            from release_install import mark_ready
-            from werkzeug.serving import make_server
 
-            with make_server(LISTEN_HOST, LISTEN_PORT, app, threaded=True) as listener:
-                mark_ready(VERSION, ROLE)
-                listener.serve_forever()
-            return
-        socketio.run(app, host=LISTEN_HOST, port=LISTEN_PORT, debug=False, allow_unsafe_werkzeug=True)
+    def bind(listeners, purpose, host, port, application, **options):
+        try:
+            return listeners.enter_context(make_server(host, port, application, threaded=True, **options))
+        except (OSError, SystemExit) as error:
+            alog("LISTENER_BIND_FAILED", "ERROR", listener=purpose, port=port, error_type=type(error).__name__)
+            journal_record("service_exception")
+            raise
+
+    diagnostic_stop = threading.Event()
+    try:
+        with ExitStack() as listeners:
+            panel = bind(listeners, "panel", LISTEN_HOST, LISTEN_PORT, app, **kwargs)
+            events = (bind(listeners, "phone_http", VICTORIA_EVENT_HOST, VICTORIA_EVENT_PORT, victoria_event_app)
+                      if VICTORIA_EVENT_PORT else None)
+            reports = (bind(listeners, "report_http", VICTORIA_REPORT_HOST, VICTORIA_REPORT_PORT, victoria_report_app)
+                       if VICTORIA_REPORT_PORT else None)
+            mark_ready(VERSION, ROLE)
+            wait_for_activation()
+            if ping_trust is not None and not ping_trust.activate():
+                alog("PING_TRUST_PUBLISH_FAILED", "WARNING")
+
+            threading.Thread(target=ping_loop, daemon=True).start()
+            threading.Thread(target=cleanup_loop, daemon=True).start()
+            if report_sync is not None:
+                report_sync.start()
+            elif node_sync:
+                node_sync.import_at_startup(setting("FEDERATION_INVITATION"))
+                node_sync.start()
+            elif availability_probe is not None:
+                availability_probe.start()
+
+            if events is not None:
+                threading.Thread(target=events.serve_forever, name="victoria-event-http", daemon=True).start()
+                listeners.callback(events.shutdown)
+                alog("PHONE_HTTP_READY", host=VICTORIA_EVENT_HOST, port=VICTORIA_EVENT_PORT)
+            if reports is not None:
+                threading.Thread(target=reports.serve_forever, name="victoria-report-http", daemon=True).start()
+                listeners.callback(reports.shutdown)
+                alog("REPORT_HTTP_READY", host=VICTORIA_REPORT_HOST, port=VICTORIA_REPORT_PORT)
+            journal_record("service_started")
+            alog("APP_READY", host=LISTEN_HOST, port=LISTEN_PORT, role=ROLE)
+            threading.Thread(target=diagnostic_loop, args=(diagnostic_stop,),
+                             name="diagnostic-status", daemon=True).start()
+            panel.serve_forever()
     finally:
-        if node_sync:
+        diagnostic_stop.set()
+        if report_sync is not None:
+            report_sync.stop()
+        elif node_sync:
             node_sync.stop()
+        elif availability_probe is not None:
+            availability_probe.stop()
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ LAUNCHER = Path(__file__).resolve().parents[1] / "offline" / "run.py"
 
 def test_offline_launcher_imports_application_modules_and_vendored_dependencies(tmp_path, monkeypatch):
     monkeypatch.delenv("MONITORING_SIP_ROLE", raising=False)
+    monkeypatch.delenv("VICTORIA_ROLE_GRANT", raising=False)
     shutil.copyfile(LAUNCHER, tmp_path / "run.py")
     app = tmp_path / "app"
     app.mkdir()
@@ -48,6 +49,7 @@ def test_offline_launcher_imports_application_modules_and_vendored_dependencies(
 def first_start(monkeypatch):
     monkeypatch.delenv("MONITORING_SIP_ROLE", raising=False)
     monkeypatch.delenv("MONITORING_SIP_SETUP", raising=False)
+    monkeypatch.delenv("VICTORIA_ROLE_GRANT", raising=False)
     def unexpected_prompt(*args):
         raise AssertionError("Fresh offline startup prompted for connection settings")
 
@@ -75,6 +77,16 @@ def test_migrated_env_defaults_to_node_without_setup_flag(tmp_path, monkeypatch)
         "APP_SECRET_KEY=legacy-secret",
         "MONITORING_SIP_ROLE=node",
     ]
+
+
+def test_configured_grant_is_left_to_server_validation(tmp_path, monkeypatch):
+    configure = first_start(monkeypatch)
+    (tmp_path / "victoria-role.json").touch()
+    env = tmp_path / ".env"
+
+    configure(env)
+
+    assert not env.exists()
 
 
 def test_explicit_standalone_role_is_preserved(tmp_path, monkeypatch):
@@ -114,6 +126,7 @@ def test_lab_launcher_bypasses_office_startup_and_forwards_arguments(tmp_path):
 
 def test_managed_launcher_accepts_only_absolute_data_directory(tmp_path, monkeypatch):
     monkeypatch.delenv("MONITORING_SIP_ROLE", raising=False)
+    monkeypatch.delenv("VICTORIA_ROLE_GRANT", raising=False)
     shutil.copyfile(LAUNCHER, tmp_path / "run.py")
     app = tmp_path / "app"
     app.mkdir()

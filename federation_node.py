@@ -163,6 +163,7 @@ class NodeSync:
         self._update_worker = None
         self._update_retry_after = 0.0
         self.last_error = None
+        self.last_error_code = None
 
     def _load_link(self):
         with closing(connect(self.db_file)) as db:
@@ -189,6 +190,12 @@ class NodeSync:
             "last_sync": float(last_seen["value"]) if last_seen else None,
             "error": self.last_error,
         }
+
+    def diagnostic_identity(self):
+        link = self._load_link()
+        if link is None:
+            return None
+        return {"schema": 1, "url": link["url"], "tls_ca": link["tls_ca"], "center_id": link["center_id"]}
 
     @staticmethod
     def _meta(db, key):
@@ -256,6 +263,7 @@ class NodeSync:
             self._save_link(link)
             self._publish_ping_trust(link)
             self.last_error = None
+            self.last_error_code = None
             self._wake.set()
 
     def import_at_startup(self, filename):
@@ -359,7 +367,19 @@ class NodeSync:
         }
         if self._ping_trust is not None:
             payload["ping_trust_revision"] = None
-        reply = self._request(link, "/enroll", payload)
+        try:
+            reply = self._request(link, "/enroll", payload)
+        except urllib.error.HTTPError as error:
+            if error.code == 401:
+                try:
+                    details = json.loads(error.read(4097))
+                    if isinstance(details, dict) and details.get("error") == "invitation_expired":
+                        error.inei_code = "invitation_expired"
+                except (AttributeError, OSError, ValueError):
+                    pass
+                finally:
+                    error.close()
+            raise
         if reply.get("center_id") != link["center_id"] or reply.get("node_id") != link["node_id"]:
             raise FederationError("Некорректное подтверждение регистрации.")
         self._receive_ping_trust(link, reply)
@@ -588,6 +608,7 @@ class NodeSync:
             for command in commands:
                 self._execute(active_link, command)
             self.last_error = None
+            self.last_error_code = None
             return True
 
     def start(self):
@@ -613,14 +634,20 @@ class NodeSync:
             except FederationError as error:
                 outcome = "disconnected"
                 self.last_error = str(error)
+                self.last_error_code = "disconnected"
                 delay = min(delay * 2, 60)
             except urllib.error.HTTPError as error:
                 outcome = "disconnected"
                 self.last_error = f"Сервер отклонил запрос ({error.code})."
+                self.last_error_code = getattr(error, "inei_code", None) or (
+                    "auth_failed" if error.code in {401, 403} else "disconnected"
+                )
                 delay = min(delay * 2, 60)
             except Exception as error:
                 outcome = "disconnected"
                 self.last_error = "Связь с сервером недоступна."
+                reason = error.reason if isinstance(error, urllib.error.URLError) else error
+                self.last_error_code = "tls_failed" if isinstance(reason, ssl.SSLError) else "disconnected"
                 LOG.debug("Federation sync unavailable: %s", type(error).__name__)
                 delay = min(delay * 2, 60)
             if outcome != connection:

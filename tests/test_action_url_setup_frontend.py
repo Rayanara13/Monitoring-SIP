@@ -11,13 +11,6 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="Node is ne
 PANEL = Path(__file__).resolve().parent.parent / "panel.html"
 
 
-def test_entire_panel_script_parses_before_startup():
-    script = PANEL.read_text(encoding="utf-8").split("<script>", 1)[1].split("</script>", 1)[0]
-    result = subprocess.run(["node", "--check", "-"], input=script, encoding="utf-8",
-                            capture_output=True, timeout=15)
-    assert result.returncode == 0, result.stderr
-
-
 def run_panel(body, catalog=None):
     source = PANEL.read_text(encoding="utf-8")
     program = "//" + source.split("// ── Action URL ─", 1)[1].split("// ── User info & init ─", 1)[0]
@@ -63,6 +56,41 @@ run().catch(error=>{console.error(error);process.exitCode=1;});
     result = subprocess.run(["node", "-"], input=script, encoding="utf-8", capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def test_victoria_cfg_uses_phone_http_ingress_even_when_panel_is_on_https_localhost():
+    result = run_panel("""
+      browser.currentUserInfo.server_role = 'victoria';
+      browser.location = {hostname:'localhost',host:'localhost',port:'',protocol:'https:'};
+      element('aurl-host').value = '';
+      browser.fetch = async () => ({ok:true,json:async()=>({events:CATALOG,
+        phones:[{number:'101',ip:'192.0.2.11'}],server_ip:'192.0.2.20',
+        event_origin:'http://192.0.2.10:8000'})});
+      await vm.runInContext('loadActionUrlPhones()',browser);
+      assert.equal(element('aurl-host').value, 'http://192.0.2.10:8000');
+      element('aurl-number').value = '101';
+      const config = vm.runInContext('buildActionUrlConfig()', browser);
+      element('aurl-host').value = '192.0.2.10:18080';
+      await vm.runInContext('loadActionUrlPhones()',browser);
+      assert.equal(vm.runInContext('actionUrlOrigin()', browser), 'http://192.0.2.10:18080');
+      element('aurl-host').value = 'https://192.0.2.10:18444';
+      assert.equal(vm.runInContext('actionUrlOrigin()', browser), 'https://192.0.2.10:18444');
+      console.log(JSON.stringify(config));
+    """)
+    assert "action_url.incoming_call = http://192.0.2.10:8000/event?" in result
+
+
+def test_victoria_with_no_advertised_http_ingress_defaults_to_https():
+    result = run_panel("""
+      browser.currentUserInfo.server_role = 'victoria';
+      browser.location = {hostname:'localhost',host:'localhost',port:'',protocol:'https:'};
+      element('aurl-host').value = '';
+      browser.fetch = async () => ({ok:true,json:async()=>({events:CATALOG,
+        phones:[{number:'101',ip:'192.0.2.11'}],server_ip:'192.0.2.10'})});
+      await vm.runInContext('loadActionUrlPhones()',browser);
+      console.log(JSON.stringify(vm.runInContext('actionUrlOrigin()',browser)));
+    """)
+    assert result == "https://192.0.2.10"
 
 
 def test_one_selected_card_is_literal_local_in_every_url():

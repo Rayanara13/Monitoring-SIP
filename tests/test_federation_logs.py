@@ -61,6 +61,31 @@ def test_retention_and_cursor_are_stable_across_new_entries_and_restart(tmp_path
     assert journal.read(before=6) == {"entries": [], "next_before": None}
 
 
+def test_admin_audit_retains_bounded_typed_events_and_removes_expired_rows(tmp_path, monkeypatch):
+    path = tmp_path / "audit.db"
+    monkeypatch.setattr(logs, "AUDIT_MAX_ENTRIES", 3)
+    clock = [1_700_000_000]
+    monkeypatch.setattr(logs.time, "time", lambda: clock[0])
+    audit = logs.AdminAudit(path)
+    fields = {"actor": "admin", "target_type": "user", "target": "operator.one", "outcome": "applied"}
+    assert audit.record("user.create", **fields, when=clock[0] - logs.AUDIT_RETENTION_SECONDS - 1)
+    assert audit.read()["entries"] == []
+    assert not audit.record("user.create", **{**fields, "target": "https://example/?token=private"})
+    assert audit.record("user.password.reset", **fields, job_id="reset",
+                        code="token=private", to_version="https://example/?token=private")
+    for _ in range(10):
+        assert audit.record("user.password.reset", **fields, job_id="reset")
+    for action in ("user.create", "user.disable", "user.token.rotate"):
+        assert audit.record(action, **fields)
+    assert len(audit.read()["entries"]) == 3
+    assert audit.read(job_id="reset")["entries"] == []
+    assert b"token=private" not in path.read_bytes()
+    clock[0] += logs.AUDIT_RETENTION_SECONDS + 1
+    assert logs.AdminAudit(path).read()["entries"] == []
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM admin_audit").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("payload", [
     {"limit": 0}, {"limit": True}, {"limit": 101}, {"limit": "5"}, {"before": -1},
     {"before": 2**53}, {"path": "app.log"}, {"command": "tail"}, None,

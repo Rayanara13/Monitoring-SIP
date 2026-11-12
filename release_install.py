@@ -37,12 +37,14 @@ from federation_updates import PackageStore, UpdateDownloadError, UpdateError, _
 STATE_ENV = "INEI_UPDATE_STATE"
 READY_ENV = "INEI_UPDATE_READY"
 PACKAGE_ENV = "INEI_RUNNING_PACKAGE"
+ACTIVATION_ENV = "INEI_ACTIVATION_JOB"
 _JOB = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}")
 _HASH = re.compile(r"[a-f0-9]{64}")
-_ROLES = {"node"}
+_ROLES = {"node", "victoria"}
 _MAX_EXTRACTED = 768 * 1024 * 1024
 _MAX_ENTRIES = 20_000
-_PRIVATE = {".env", "auth.json", "victoria-role.json", "victoria_role_authority.pem", "users_data"}
+_PRIVATE = {".env", "auth.json", "ping-trust.json", "victoria-role.json", "victoria_role_authority.pem", "users_data"}
+_MAX_MAINTENANCE_FILE = 10 * 1024 * 1024
 
 
 def _read(path):
@@ -97,9 +99,84 @@ def queue_update(package, job_id, role):
     return {"status": "running", "code": "installation_queued", "package_id": package.id, "version": job["version"]}
 
 
+def maintenance_status(job_id):
+    if not managed() or not isinstance(job_id, str) or not _JOB.fullmatch(job_id):
+        return None
+    root = Path(os.environ[STATE_ENV])
+    if result := _read(root / "results" / f"{job_id}.json"):
+        return result
+    waiting = _read(root / "request.json")
+    if waiting and waiting["id"] == job_id and waiting.get("kind") == "maintenance":
+        return {"job_id": job_id, "status": "running", "code": "maintenance_queued"}
+    return None
+
+
+def _maintenance_path(path):
+    if (not isinstance(path, str) or not 1 <= len(path) <= 240 or "\\" in path
+            or any(ord(character) < 32 for character in path)):
+        raise UpdateError("file_change_rejected", "Недопустимый путь файла.")
+    parts = path.split("/")
+    protected = _PRIVATE | {"release_install.py", "run.py", "bootstrap.py", "update_authority.pub",
+                             "config", "keys", "certs", "backup", "__pycache__"}
+    if any(not part or part.startswith(".") or ":" in part or part.rstrip(". ") != part
+           or part.casefold() in protected or part.casefold().endswith((".key", ".pem", ".bak", ".old", "~"))
+           or re.match(r"(?i)^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", part) for part in parts):
+        raise UpdateError("file_change_rejected", "Недопустимый путь файла.")
+    return parts
+
+
+def queue_maintenance(action, version, role, *, path=None, contents=None, job_id=None):
+    if not managed() or role not in _ROLES:
+        raise UpdateError("managed_update_unavailable", "Запустите сервер штатным установщиком.")
+    if action not in {"restart", "write", "delete"}:
+        raise UpdateError("invalid_job", "Недопустимая операция с приложением.")
+    if action != "restart":
+        _maintenance_path(path)
+    if action == "write" and (not isinstance(contents, bytes) or len(contents) > _MAX_MAINTENANCE_FILE):
+        raise UpdateError("file_change_rejected", "Файл слишком большой.")
+    root = Path(os.environ[STATE_ENV])
+    job_id = uuid4().hex if job_id is None else job_id
+    package_id = os.environ.get(PACKAGE_ENV) or None
+    _check_ids(job_id, package_id or "0" * 64)
+    job = {"id": job_id, "kind": "maintenance", "action": action, "role": role,
+           "package_id": package_id, "version": version, "path": path}
+    with _installation_lock(root / "queue.lock"):
+        if (root / "request.json").exists():
+            raise UpdateDownloadError("update_busy", "Дождитесь завершения текущей операции.")
+        if action == "write":
+            import hashlib
+
+            incoming = root / "incoming" / f"{job_id}.bin"
+            incoming.parent.mkdir(mode=0o700, exist_ok=True)
+            with incoming.open("xb") as stream:
+                stream.write(contents)
+                stream.flush()
+                os.fsync(stream.fileno())
+            job["sha256"] = hashlib.sha256(contents).hexdigest()
+        _write(root / "request.json", job)
+    return {"job_id": job_id, "status": "running", "code": "maintenance_queued"}
+
+
 def mark_ready(version, role):
     if filename := os.environ.get(READY_ENV):
         _write(Path(filename), {"version": version, "role": role, "pid": os.getpid()})
+
+
+def wait_for_activation():
+    """Wait for the supervisor to commit a candidate before publishing its state."""
+    if not (job_id := os.environ.get(ACTIVATION_ENV)):
+        return
+    _check_ids(job_id, "0" * 64)
+    active = Path(os.environ[STATE_ENV]) / "active.json"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            if (_read(active) or {}).get("id") == job_id:
+                return
+        except OSError:
+            pass  # A concurrent atomic replace can briefly block a Windows reader.
+        time.sleep(0.05)
+    raise RuntimeError("candidate activation was not committed by the supervisor")
 
 
 def update_public_key(app_dir, data):
@@ -167,10 +244,12 @@ def _prepare(package, target, original, role):
                     shutil.copyfileobj(source, dest, 1024 * 1024)
         app = stage / "app"
         central = (app / "federation_center.py").is_file()
-        if (central or role not in _ROLES or not all((app / f).is_file() for f in
+        if (central != (role == "victoria") or not all((app / f).is_file() for f in
                 ("server.py", "release_install.py", "federation_updates.py")) or not _python(stage).is_file()
                 or not (stage / "vendor").is_dir()):
             raise ValueError("incorrect update profile or runtime")
+        if central:
+            shutil.copyfile(original / "app" / "victoria_role_authority.pem", app / "victoria_role_authority.pem")
         anchor = original / "app" / "update_authority.pub"
         if anchor.is_file():
             shutil.copyfile(anchor, app / anchor.name)
@@ -180,12 +259,51 @@ def _prepare(package, target, original, role):
 
 
 def _mutable_files(data):
-    for name in (".env", "auth.json"):
+    for name in (".env", "auth.json", "ping-trust.json"):
         if (data / name).is_file():
             yield Path(name)
     for item in (data / "users_data").iterdir():
-        if item.is_file() and re.search(r"\.(?:json|db|sqlite3)(?:-wal|-shm|-journal)?$", item.name):
+        if item.is_file() and (item.name == "first-start.txt"
+                               or re.search(r"\.(?:json|db|sqlite3)(?:-wal|-shm|-journal)?$", item.name)):
             yield item.relative_to(data)
+
+
+def _prepare_file_change(state, job, current, target):
+    import hashlib
+
+    parts = _maintenance_path(job["path"])
+    with tempfile.TemporaryDirectory(dir=target.parent, prefix=".edit-") as temporary:
+        stage = Path(temporary)
+
+        def excluded(folder, names):
+            return {name for name in names if name.casefold() in _PRIVATE - {"victoria_role_authority.pem"}
+                    or name == "__pycache__" or (Path(folder) / name).is_symlink()}
+
+        shutil.copytree(current / "app", stage / "app", ignore=excluded)
+        for name in ("runtime", "vendor"):
+            shutil.copytree(current / name, stage / name, symlinks=True)
+        app = stage / "app"
+        output = app.joinpath(*parts)
+        if not output.resolve().is_relative_to(app.resolve()):
+            raise ValueError("file resolves outside application")
+        if job["action"] == "write":
+            incoming = state / "incoming" / f"{job['id']}.bin"
+            with incoming.open("rb") as stream:
+                contents = stream.read(_MAX_MAINTENANCE_FILE + 1)
+            if len(contents) > _MAX_MAINTENANCE_FILE or hashlib.sha256(contents).hexdigest() != job["sha256"]:
+                raise ValueError("queued file has changed")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(contents)
+        elif job["action"] == "delete":
+            output.unlink()
+        else:
+            raise ValueError("unsupported file action")
+        required = {"server.py", "release_install.py", "login.html", "panel.html"}
+        if job["role"] == "victoria":
+            required.update({"federation.html", "server_admin.html", "federation_identity.py"})
+        if not all((app / name).is_file() for name in required):
+            raise ValueError("required application file missing")
+        stage.rename(target)
 
 
 def _snapshot(data, backup):
@@ -202,12 +320,30 @@ def _restore(data, backup):
         (data / relative).unlink()
     for relative in files:
         target = data / relative
-        shutil.copy2(backup / relative, target)
+        # A firewall helper may read ping-trust.json while rollback is restoring it.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".restore-", delete=False) as output:
+                temporary = Path(output.name)
+                with (backup / relative).open("rb") as original:
+                    shutil.copyfileobj(original, output)
+                output.flush()
+                os.fsync(output.fileno())
+            shutil.copystat(backup / relative, temporary)
+            os.replace(temporary, target)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 def _finish(state, job, status, code):
     result = {"status": status, "code": code, "package_id": job["package_id"], "version": job["version"]}
+    if job.get("kind") == "maintenance":
+        result["job_id"] = job["id"]
+        result["finished_at"] = int(time.time())
     _write(state / "results" / f"{job['id']}.json", result)
+    if job.get("kind") == "maintenance":
+        (state / "incoming" / f"{job['id']}.bin").unlink(missing_ok=True)
     (state / "request.json").unlink(missing_ok=True)
     (state / "transaction.json").unlink(missing_ok=True)
 
@@ -222,10 +358,14 @@ def _stop(child):
             child.wait()
 
 
-def _spawn(original, release, data, state, package):
+def _spawn(original, release, data, state, package, *, activation_job=None):
     ready = state / f"ready-{uuid4().hex}.json"
     env = {**os.environ, STATE_ENV: str(state), READY_ENV: str(ready), PACKAGE_ENV: package or "",
            "FLASK_SKIP_DOTENV": "1"}
+    if activation_job is None:
+        env.pop(ACTIVATION_ENV, None)
+    else:
+        env[ACTIVATION_ENV] = activation_job
     env.setdefault("PYTHONIOENCODING", "utf-8")
     python = _python(release)
     if release == original and not python.is_file():
@@ -255,7 +395,8 @@ def _local_package(original, data, job):
     _check_ids(job.get("id"), job.get("package_id"))
     if job.get("role") not in _ROLES:
         raise ValueError("invalid role")
-    store = PackageStore(data / "users_data/federation-updates/packages", update_public_key(original / "app", data))
+    suffix = "update_packages" if job["role"] == "victoria" else "federation-updates/packages"
+    store = PackageStore(data / "users_data" / suffix, update_public_key(original / "app", data))
     package = store.lookup(job["package_id"])
     if ((package.manifest["platform"], package.manifest["arch"]) != _local_target()
             or package.manifest["version"] != job["version"]):
@@ -283,16 +424,29 @@ def _recover_transaction(state, data, active):
 
 
 def _switch(original, state, data, child, active, job):
-    _check_ids(job.get("id"), job.get("package_id"))
+    maintenance = job.get("kind") == "maintenance"
+    _check_ids(job.get("id"), job.get("package_id") or ("0" * 64 if maintenance else None))
     previous = state / "versions" / active["id"] if active else original
+    if maintenance and job.get("action") == "restart":
+        _stop(child)
+        child, ready = _spawn(original, previous, data, state, active.get("package_id"))
+        if _wait_ready(child, ready, version=job["version"], role=job["role"]):
+            _finish(state, job, "applied", "restart_verified")
+            return child, active
+        _stop(child)
+        _finish(state, job, "failed", "restart_failed")
+        raise RuntimeError("application did not restart")
     target = state / "versions" / job["id"]
     backup = state / "backup" / job["id"]
     try:
         _remove_tree(state, target)
-        package = _local_package(original, data, job)
-        _prepare(package, target, original, job["role"])
+        if maintenance:
+            _prepare_file_change(state, job, previous, target)
+        else:
+            package = _local_package(original, data, job)
+            _prepare(package, target, original, job["role"])
     except (OSError, ValueError, KeyError, BadZipFile):
-        _finish(state, job, "failed", "package_cannot_be_installed")
+        _finish(state, job, "failed", "file_change_rejected" if maintenance else "package_cannot_be_installed")
         return child, active
 
     _stop(child)
@@ -300,23 +454,24 @@ def _switch(original, state, data, child, active, job):
         _remove_tree(state, backup)
         _snapshot(data, backup)
         _write(state / "transaction.json", job)
-        child, ready = _spawn(original, target, data, state, job["package_id"])
+        child, ready = _spawn(original, target, data, state, job["package_id"], activation_job=job["id"])
         if _wait_ready(child, ready, version=job["version"], role=job["role"]):
             installed = {"id": job["id"], "package_id": job["package_id"]}
             _write(state / "active.json", installed)
             active = installed
-            _finish(state, job, "applied", "restart_verified")
-            for old in (state / "versions").iterdir():
-                if old != target and _JOB.fullmatch(old.name):
-                    _remove_tree(state, old)
-            return child, active
-        _stop(child)
+        else:
+            _stop(child)
     except (OSError, ValueError):
         _stop(child)
     finally:
         if (state / "transaction.json").exists():
             _recover_transaction(state, data, active)
         _remove_tree(state, backup)
+    if active.get("id") == job["id"]:
+        for old in (state / "versions").iterdir():
+            if old != target and _JOB.fullmatch(old.name):
+                _remove_tree(state, old)
+        return child, active
     if not (state / "results" / f"{job['id']}.json").exists():
         _finish(state, job, "failed", "installation_rolled_back")
     replacement, ready = _spawn(original, previous, data, state, active.get("package_id"))

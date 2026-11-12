@@ -68,7 +68,7 @@ def create_lab(data_dir: Path, port: int):
     token = prepare_data(data_dir)
     # Процесс стенда не использует роль, подключение и доступ к телефонам узла.
     for key in tuple(os.environ):
-        if key.startswith(("MONITORING_SIP_", "FEDERATION_", "YEALINK_")):
+        if key.startswith(("MONITORING_SIP_", "VICTORIA_", "FEDERATION_", "YEALINK_")):
             del os.environ[key]
     os.chdir(data_dir)
     module_name = "monitoring_sip_phone_lab_server"

@@ -33,8 +33,8 @@ def live_lab(tmp_path_factory):
             return json.loads(response.read())
 
     with (runtime / "process.log").open("wb") as log:
-        env = {**os.environ, "PYTHONUTF8": "1", "MONITORING_SIP_ROLE": "unsupported",
-               "FEDERATION_INVITATION": str(runtime / "missing-invitation.json")}
+        env = {**os.environ, "PYTHONUTF8": "1", "MONITORING_SIP_ROLE": "victoria",
+               "VICTORIA_ROLE_GRANT": str(runtime / "missing-grant.json")}
         process = subprocess.Popen([sys.executable, "-m", "simulator", "--port", str(port),
                                     "--data-dir", str(runtime / "data")], cwd=ROOT,
                                    env=env, stdout=log, stderr=log)

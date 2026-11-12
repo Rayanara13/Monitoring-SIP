@@ -23,6 +23,12 @@ SERVICE = "inei-ping-firewall.service"
 TIMER = "inei-ping-firewall.timer"
 TABLE = "inei_ping"
 MARKER = "inei-ping-v1:"
+_MARKER_PATTERN = re.escape(MARKER) + r"[0-9a-f]{64}"
+_ASTRA_NETWORK_RULE = re.compile(
+    r'^\s*iifname != "lo" ip saddr != ([\d.]+/\d+) ip saddr != @trusted4 '
+    r'icmp type echo-request counter drop comment "' + _MARKER_PATTERN + r'"\s*$',
+    re.MULTILINE,
+)
 TRUST_FILE = "ping-trust.json"
 MAX_BYTES = 64 * 1024
 MAX_ADDRESSES = 1024
@@ -98,21 +104,25 @@ def _read_addresses(path):
     return sorted(addresses, key=lambda address: (address.version, int(address)))
 
 
-def _policy(addresses):
-    digest = hashlib.sha256("\n".join(map(str, addresses)).encode("ascii")).hexdigest()
+def _policy(addresses, network=None):
+    items = list(map(str, addresses))
+    if network is not None:
+        items.insert(0, str(network))
+    digest = hashlib.sha256("\n".join(items).encode("ascii")).hexdigest()
     marker = MARKER + digest
-    lines = [f"add table inet {TABLE}", f"delete table inet {TABLE}", f"table inet {TABLE} {{",
-             f'    comment "{marker}"']
+    lines = [f"add table inet {TABLE}", f"delete table inet {TABLE}", f"table inet {TABLE} {{"]
     for version, address_type in ((4, "ipv4_addr"), (6, "ipv6_addr")):
         lines.extend([f"    set trusted{version} {{", f"        type {address_type}"])
         elements = ", ".join(str(address) for address in addresses if address.version == version)
         if elements:
             lines.append(f"        elements = {{ {elements} }}")
         lines.append("    }")
+    local_network = f"ip saddr != {network} " if network is not None else ""
     lines.extend([
         "    chain input {",
         "        type filter hook input priority -10; policy accept;",
-        '        iifname != "lo" ip saddr != @trusted4 icmp type echo-request counter drop',
+        f'        iifname != "lo" {local_network}ip saddr != @trusted4 '
+        f'icmp type echo-request counter drop comment "{marker}"',
         '        iifname != "lo" ip6 saddr != @trusted6 icmpv6 type echo-request counter drop',
         "    }",
         "}",
@@ -127,11 +137,29 @@ def _current_marker():
                for item in tables):
         return None
     current = json.loads(_run("nft", "-j", "list", "table", "inet", TABLE).stdout)["nftables"]
-    table = next(item["table"] for item in current if "table" in item)
-    marker = table.get("comment", "")
-    if not re.fullmatch(re.escape(MARKER) + r"[0-9a-f]{64}", marker):
+    markers = []
+    for item in current:
+        table = item.get("table", {})
+        rule = item.get("rule", {})
+        # Старые комплекты отмечали таблицу. Astra с nft 0.9.6 поддерживает комментарий к правилу.
+        if table.get("family") == "inet" and table.get("name") == TABLE:
+            comment = table.get("comment", "")
+        elif rule.get("family") == "inet" and rule.get("table") == TABLE and rule.get("chain") == "input":
+            comment = rule.get("comment", "")
+        else:
+            continue
+        if re.fullmatch(_MARKER_PATTERN, comment):
+            markers.append(comment)
+    if len(markers) != 1:
         raise FirewallError(f"Таблица inet {TABLE} уже используется другой конфигурацией.")
-    return marker
+    return markers[0]
+
+
+def _unlink_missing(path):
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _atomic_write(path, content, mode=0o600):
@@ -152,6 +180,29 @@ def _require_owned_directory(path):
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
         raise FirewallError(f"Каталог {path} должен принадлежать root и быть защищён от записи другими пользователями.")
+
+
+def _read_local_policy_file(path):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise FirewallError(f"Файл {path} должен принадлежать root и быть защищён от записи другими пользователями.")
+    return path.read_text(encoding="utf-8")
+
+
+def _local_ipv4_network(settings):
+    configured = settings.get("trusted_ipv4_network")
+    if configured is not None:
+        if not isinstance(configured, str) or "/" not in configured:
+            raise FirewallError("Доверенная сеть должна быть задана как IPv4 CIDR в локальных настройках.")
+        return ipaddress.IPv4Network(configured)
+
+    # Миграция локального исключения Astra. Список от приложения по-прежнему содержит только IP.
+    try:
+        snapshot = _read_local_policy_file(STATE_DIR / "rules.nft")
+    except FileNotFoundError:
+        return None
+    match = _ASTRA_NETWORK_RULE.search(snapshot)
+    return ipaddress.IPv4Network(match.group(1)) if match else None
 
 
 @contextmanager
@@ -178,19 +229,19 @@ def _apply(marker, rules, *, dry_run=False):
 def _refresh():
     _native_nft_only()
     with _locked():
-        settings = json.loads((STATE_DIR / "settings.json").read_text(encoding="utf-8"))
+        settings = json.loads(_read_local_policy_file(STATE_DIR / "settings.json"))
         try:
             addresses = _read_addresses(settings["path"])
         except (TrustFileError, FileNotFoundError) as error:
-            snapshot = (STATE_DIR / "rules.nft").read_text(encoding="utf-8")
-            match = re.search(r'comment "(' + re.escape(MARKER) + r'[0-9a-f]{64})"', snapshot)
+            snapshot = _read_local_policy_file(STATE_DIR / "rules.nft")
+            match = re.search(r'comment "(' + _MARKER_PATTERN + r')"', snapshot)
             if match is None:
                 raise FirewallError("Не удалось восстановить последнее правило Инея.") from error
             _apply(match.group(1), snapshot)
             if isinstance(error, TrustFileError):
                 raise
             return
-        _apply(*_policy(addresses))
+        _apply(*_policy(addresses, _local_ipv4_network(settings)))
 
 
 def _install_units():
@@ -278,7 +329,7 @@ def _installation_rollback():
             if path in previous:
                 restore(lambda: _atomic_write(path, *previous[path]))
             else:
-                restore(lambda: path.unlink(missing_ok=True))
+                restore(lambda: _unlink_missing(path))
         restore(lambda: _run("systemctl", "daemon-reload"))
         if failures:
             raise FirewallError(f"{original}. Откат завершён с ошибками: {'; '.join(failures)}") from original
@@ -302,7 +353,14 @@ def _install(data_dir, master_ip, dry_run):
         if master_ip is None:
             raise FirewallError(f"Файл {path} ещё не создан. Для первого запуска укажите --master-ip.") from error
         addresses = [master_ip]
-    marker, rules = _policy(addresses)
+    if STATE_DIR.exists():
+        _require_owned_directory(STATE_DIR)
+    try:
+        settings = json.loads(_read_local_policy_file(STATE_DIR / "settings.json"))
+    except FileNotFoundError:
+        settings = {}
+    network = _local_ipv4_network(settings)
+    marker, rules = _policy(addresses, network)
     _apply(marker, rules, dry_run=True)
     if dry_run:
         print(f"Список проверен. Доверенных адресов: {len(addresses)}. Правила не изменены.")
@@ -311,7 +369,10 @@ def _install(data_dir, master_ip, dry_run):
     STATE_DIR.mkdir(mode=0o700, exist_ok=True)
     with _locked(), _installation_rollback():
         _install_units()
-        _atomic_write(STATE_DIR / "settings.json", json.dumps({"path": str(path)}))
+        settings = {"path": str(path)}
+        if network is not None:
+            settings["trusted_ipv4_network"] = str(network)
+        _atomic_write(STATE_DIR / "settings.json", json.dumps(settings))
         _apply(marker, rules)
     print(f"Ограничение входящего ICMP установлено. Доверенных адресов: {len(addresses)}.")
 
@@ -328,7 +389,7 @@ def _remove():
             _run("nft", "delete", "table", "inet", TABLE)
         for file in (UNITS_DIR / TIMER, UNITS_DIR / SERVICE, HELPER,
                      STATE_DIR / "settings.json", STATE_DIR / "rules.nft"):
-            file.unlink(missing_ok=True)
+            _unlink_missing(file)
         _run("systemctl", "daemon-reload")
     print("Ограничение входящего ICMP Инея удалено.")
 
