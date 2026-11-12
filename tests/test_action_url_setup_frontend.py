@@ -11,6 +11,13 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="Node is ne
 PANEL = Path(__file__).resolve().parent.parent / "panel.html"
 
 
+def test_entire_panel_script_parses_before_startup():
+    script = PANEL.read_text(encoding="utf-8").split("<script>", 1)[1].split("</script>", 1)[0]
+    result = subprocess.run(["node", "--check", "-"], input=script, encoding="utf-8",
+                            capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
 def run_panel(body, catalog=None):
     source = PANEL.read_text(encoding="utf-8")
     program = "//" + source.split("// ── Action URL ─", 1)[1].split("// ── User info & init ─", 1)[0]

@@ -2597,7 +2597,8 @@ async function initUserInfo() {
     if (!res.ok) return;
     currentUserInfo = await res.json();
     $('nav-user').textContent = currentUserInfo.username;
-    const federationLink = $('federation-link');
+    if (currentUserInfo.is_admin) {
+      const federationLink = $('federation-link');
       federationLink.hidden = currentUserInfo.server_role !== 'node';
       $('tab-btn-accounts').style.display = '';
       $('tab-btn-tests').style.display = '';
