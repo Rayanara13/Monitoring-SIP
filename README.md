@@ -4,12 +4,24 @@ by Стёпчик
 
 Мониторинг SIP-телефонов Yealink и история звонков в браузере. Статусы обновляются в открытых вкладках, а размер и порядок карточек сохраняются на сервере.
 
+## Скачать Иней
+
+| Комплект | Версия | Размер |
+| --- | --- | --- |
+| [Скачать для Windows x64](https://raw.githubusercontent.com/Rayanara13/Monitoring-SIP/d04b6865d374525a5404b9f8ab17013bb3e11364/offline/MonitoringSIP_1.4.1_offline_windows_x64_public-node.zip) | 1.4.1 | 16,5 МБ |
+| [Скачать для Linux x64](https://github.com/Rayanara13/Monitoring-SIP/releases/download/v1.3.2/MonitoringSIP_1.3.2_offline_linux_x64_fb3f7d2.zip) | 1.3.2 | 22,5 МБ |
+| [Скачать для Linux ARM64](https://github.com/Rayanara13/Monitoring-SIP/releases/download/v1.3.2/MonitoringSIP_1.3.2_offline_linux_arm64_fb3f7d2.zip) | 1.3.2 | 18,8 МБ |
+
+В каждом ZIP находятся Python и библиотеки для выбранной платформы. На Linux проверьте архитектуру командой `uname -m`. Для `x86_64` выберите Linux x64, для `aarch64` — Linux ARM64. Комплект Linux x64 рассчитан на glibc 2.17 или новее. Запуск проверен на Ubuntu x64 в WSL. Для Astra Linux SE 1.7.6 x64 сверено требование к версии glibc.
+
 ## Установка без интернета
 
 ### Windows x64
 
-1. На GitHub нажмите **Code → Download ZIP**. Перенесите архив на флешке и распакуйте его целиком на локальный диск.
-2. Запустите `start_windows.bat` в корне распакованной папки. При первом запуске он распакует готовый комплект в `MonitoringSIP`. Python и зависимости уже включены.
+1. Скачайте готовый комплект Windows из таблицы, перенесите на флешке и распакуйте на локальный диск.
+2. Запустите `MonitoringSIP\start_windows.bat`.
+
+Если скачали через **Code → Download ZIP**, запустите `start_windows.bat` в корне распакованного архива. Он подготовит папку `MonitoringSIP` при первом запуске.
 
 Откройте `http://localhost:8000` на компьютере узла. Пароль пользователя `admin` появится в терминале при первом запуске. [Инструкция по установке и восстановлению](offline/ИНСТРУКЦИЯ.txt).
 
@@ -17,15 +29,15 @@ by Стёпчик
 
 #### Обновление с Rel 1.0
 
-1. Распакуйте скачанный архив в новую папку. Из этой папки выполните в PowerShell `.\start_windows.bat --prepare`, чтобы подготовить комплект без запуска сервера.
+1. Распакуйте скачанный архив в новую папку. Если скачали через **Code → Download ZIP**, из корня распакованного архива выполните в PowerShell `.\start_windows.bat --prepare`.
 2. Остановите Rel 1.0. Скопируйте `.env`, `auth.json` и папку `users_data` из каталога данных старого сервера в новый `MonitoringSIP/app`. Если рядом с `auth.json` есть `phones.json`, скопируйте и его. Сохраните старую папку как резервную копию.
-3. Запустите новый `start_windows.bat` из корня распакованного архива. Откройте панель по прежнему адресу и нажмите `Ctrl+F5`.
+3. Запустите `MonitoringSIP\start_windows.bat`. Для архива с кнопки **Code** можно использовать `start_windows.bat` из корня распакованного архива. Откройте панель по прежнему адресу и нажмите `Ctrl+F5`.
 
 Если в перенесённом `.env` роль не указана, Иней запустится как узел.
 
 ### Linux
 
-Готовые комплекты Linux опубликованных версий доступны в [Releases](https://github.com/Rayanara13/Monitoring-SIP/releases). Для сборки текущего выпуска из Git-клона выполните `bash offline/build_kit.sh --linux-x64` или `bash offline/build_kit.sh --linux-arm64`. Распакуйте комплект на узле и запустите `bash start_linux.sh`.
+Скачайте подходящий Linux ZIP из таблицы. Распакуйте комплект на узле и запустите `bash start_linux.sh` из папки `MonitoringSIP`. Для сборки текущего выпуска из Git-клона выполните `bash offline/build_kit.sh --linux-x64` или `bash offline/build_kit.sh --linux-arm64`.
 
 ### Участие в карте сети
 
