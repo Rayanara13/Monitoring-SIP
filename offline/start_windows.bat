@@ -2,6 +2,7 @@
 rem Monitoring SIP - start on Windows (offline kit).
 rem Tries the bundled portable Python first, then a system one (3.10+).
 setlocal
+if exist "%~dp0prepare_windows_kit.ps1" goto source_archive
 cd /d "%~dp0"
 title Monitoring SIP
 
@@ -32,3 +33,7 @@ echo The bundled one is in runtime\windows - check the archive was fully extract
 echo See the "Problems" section of the instruction file.
 pause
 exit /b 1
+
+:source_archive
+call "%~dp0..\start_windows.bat" %*
+exit /b %errorlevel%
