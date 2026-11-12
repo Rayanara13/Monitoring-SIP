@@ -19,10 +19,7 @@ def configure_first_start(env_path):
     if ROLE_KEY in os.environ:
         return
     existing = env_path.read_text() if env_path.exists() else None
-    if existing is not None and (
-        os.environ.get("MONITORING_SIP_SETUP") != "1"
-        or any(line.startswith(f"{ROLE_KEY}=") for line in existing.splitlines())
-    ):
+    if existing is not None and any(line.startswith(f"{ROLE_KEY}=") for line in existing.splitlines()):
         return
 
     prefix = "\n" if existing and not existing.endswith("\n") else ""

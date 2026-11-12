@@ -65,19 +65,25 @@ def test_first_launch_creates_node_configuration_without_prompting(tmp_path, mon
     assert env.read_text().splitlines() == ["MONITORING_SIP_ROLE=node"]
 
 
-def test_existing_env_requires_setup_opt_in(tmp_path, monkeypatch):
+def test_migrated_env_defaults_to_node_without_setup_flag(tmp_path, monkeypatch):
     env = tmp_path / ".env"
     env.write_text("APP_SECRET_KEY=legacy-secret", encoding="utf-8")
     configure = first_start(monkeypatch)
     configure(env)
-    assert env.read_text() == "APP_SECRET_KEY=legacy-secret"
-
-    monkeypatch.setenv("MONITORING_SIP_SETUP", "1")
     configure(env)
     assert env.read_text().splitlines() == [
         "APP_SECRET_KEY=legacy-secret",
         "MONITORING_SIP_ROLE=node",
     ]
+
+
+def test_explicit_standalone_role_is_preserved(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    contents = "MONITORING_SIP_ROLE=standalone\n"
+    env.write_text(contents, encoding="utf-8")
+    configure = first_start(monkeypatch)
+    configure(env)
+    assert env.read_text(encoding="utf-8") == contents
 
 
 def test_lab_launcher_bypasses_office_startup_and_forwards_arguments(tmp_path):

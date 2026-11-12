@@ -6,7 +6,6 @@ pushd "%~dp0" || goto no_directory
 if errorlevel 1 goto failed
 if /i "%~1"=="--prepare" goto prepared
 
-set "MONITORING_SIP_SETUP=1"
 call "%CD%\MonitoringSIP\start_windows.bat" %*
 set "RESULT=%errorlevel%"
 popd

@@ -4,9 +4,12 @@ $ErrorActionPreference = 'Stop'
 $source = [IO.Directory]::GetParent($PSScriptRoot).FullName
 $destination = Join-Path $source 'MonitoringSIP'
 $archive = Join-Path $PSScriptRoot 'MonitoringSIP_1.4.1_offline_windows_x64_public-node.zip'
-$expectedHash = '035F7985489391A9DE1E2DBDFA325387105CF0EC3024DAC5175D1D923DEE9C4F'
+$expectedHash = '8F1DB9075890866261BB93E9F6B87378C917E7DB98B34431E0A8B54CFEA3E413'
 $brokenPanelHash = '11018E176010E965044776568398FA6533A8BB05D975A699A6A19230B2591CC9'
 $fixedPanelHash = '02EC57074631624DF3E29DE6BE5F6B9D8EBD4713DDA42B2C68AE00EE7D71A9F8'
+
+$previousLauncherHash = '461CA1A966A52F424DBC1F94FA1AB088867E946C297F4CDB857D23DE6F04E9FF'
+$fixedLauncherHash = 'F5C91375F9EFF26AF4DF4CFE4CE4FFCE001574FC3C8D2F7748E23B6ECCF9C99D'
 
 function Test-OfflineKit([string]$Path) {
     foreach ($dir in '.', 'app', 'runtime', 'runtime\windows', 'vendor', 'vendor\flask') {
@@ -37,21 +40,20 @@ function Get-FileSha256([string]$Path) {
     finally { $file.Dispose() }
 }
 
-function Repair-Panel([string]$Path) {
-    $panel = Join-Path $Path 'app\panel.html'
-    if ((Get-FileSha256 $panel) -cne $brokenPanelHash) { return }
+function Repair-KitFile([string]$Target, [string]$Replacement, [string]$OldHash, [string]$NewHash) {
+    if ((Get-FileSha256 $Target) -cne $OldHash) { return $false }
 
-    $fixedPanel = Join-Path $source 'panel.html'
-    $temporary = Join-Path ([IO.Path]::GetDirectoryName($panel)) ('.panel-repair-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $temporary = Join-Path ([IO.Path]::GetDirectoryName($Target)) ('.inei-repair-' + [Guid]::NewGuid().ToString('N') + '.tmp')
     try {
-        [IO.File]::Copy($fixedPanel, $temporary)
-        if ((Get-FileSha256 $temporary) -cne $fixedPanelHash) {
-            throw 'The corrected panel did not match its expected SHA-256. Extract the entire GitHub Code ZIP.'
+        [IO.File]::Copy($Replacement, $temporary)
+        if ((Get-FileSha256 $temporary) -cne $NewHash) {
+            throw "The corrected $([IO.Path]::GetFileName($Target)) did not match its expected SHA-256. Extract the entire GitHub Code ZIP."
         }
-        if ((Get-FileSha256 $panel) -ceq $brokenPanelHash) {
-            [IO.File]::Replace($temporary, $panel, [NullString]::Value)
-            Write-Output 'Corrected the panel in the existing 1.4.1 kit.'
+        if ((Get-FileSha256 $Target) -ceq $OldHash) {
+            [IO.File]::Replace($temporary, $Target, [NullString]::Value)
+            return $true
         }
+        return $false
     } finally {
         [IO.File]::Delete($temporary)
     }
@@ -61,7 +63,14 @@ if (Test-Path -LiteralPath $destination) {
     if (-not (Test-OfflineKit $destination)) {
         throw 'The MonitoringSIP path already exists and is incomplete or from another release. Move it aside and keep its data before retrying.'
     }
-    Repair-Panel $destination
+    $panel = Join-Path $destination 'app\panel.html'
+    if (Repair-KitFile $panel (Join-Path $source 'panel.html') $brokenPanelHash $fixedPanelHash) {
+        Write-Output 'Corrected the panel in the existing 1.4.1 kit.'
+    }
+    $launcher = Join-Path $destination 'run.py'
+    if (Repair-KitFile $launcher (Join-Path $PSScriptRoot 'run.py') $previousLauncherHash $fixedLauncherHash) {
+        Write-Output 'Corrected the launcher in the existing 1.4.1 kit.'
+    }
     return
 }
 if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
