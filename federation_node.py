@@ -18,6 +18,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 from federation_updates import _local_target
+from ping_trust import MAX_TRUSTED_IPS, endpoint_ip, read_trust_snapshot
 
 API = "/api/federation/v1"
 HISTORY_BATCH = 100
@@ -141,7 +142,8 @@ def read_json_response(opener, req):
 
 
 class NodeSync:
-    def __init__(self, db_file, version, snapshot, run_command, *, interval=5, master_url=None, on_connection=None):
+    def __init__(self, db_file, version, snapshot, run_command, *, interval=5, master_url=None,
+                 on_connection=None, availability_probe=None, ping_trust=None):
         self.db_file = db_file
         self.version = version
         self.installed_package = os.environ.get("INEI_RUNNING_PACKAGE") or None
@@ -150,6 +152,10 @@ class NodeSync:
         self.interval = interval
         self.master_url = master_url
         self.on_connection = on_connection
+        self._availability_probe = availability_probe
+        self._availability_revision = None
+        self._ping_trust = ping_trust
+        self._published_ping_trust = None
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -246,8 +252,9 @@ class NodeSync:
                 "node_token": secrets.token_urlsafe(32),
                 "enrolled": False,
             }
-            self._save_link({**current, "pending_invitation": candidate}
-                            if current and current["enrolled"] else candidate)
+            link = {**current, "pending_invitation": candidate} if current and current["enrolled"] else candidate
+            self._save_link(link)
+            self._publish_ping_trust(link)
             self.last_error = None
             self._wake.set()
 
@@ -287,6 +294,7 @@ class NodeSync:
             link.update(endpoint)
             link.pop("fallback", None)
             self._save_link(link)
+            self._publish_ping_trust(link)
             self._wake.set()
 
     def _request(self, link, path, payload=None, *, authenticated=False):
@@ -304,13 +312,57 @@ class NodeSync:
         if self._request(link, "/identity").get("center_id") != link["center_id"]:
             raise FederationError("Идентификатор сервера не совпал.")
 
+    def _publish_ping_trust(self, link):
+        if self._ping_trust is None:
+            return None
+        snapshot = None
+        if link and link.get("enrolled") and "ping_trust" in link:
+            try:
+                snapshot = read_trust_snapshot(link["ping_trust"])
+            except ValueError:
+                LOG.warning("Ignoring an invalid saved ping trust snapshot")
+        address = endpoint_ip(link["url"] if link else self.master_url)
+        revision = snapshot["revision"] if snapshot else None
+        policy = (address, revision)
+        addresses = snapshot["addresses"] if snapshot else []
+        if address and address not in addresses:
+            addresses = [address, *addresses[:MAX_TRUSTED_IPS - 1]]
+        if (addresses or link) and self._published_ping_trust != policy:
+            if self._ping_trust.publish(addresses):
+                self._published_ping_trust = policy
+        return revision
+
+    def _receive_ping_trust(self, link, reply):
+        if self._ping_trust is None:
+            return False
+        if "ping_trust" not in reply:
+            if "ping_trust_revision" not in reply and "ping_trust" in link:
+                del link["ping_trust"]
+                return True
+            return False
+        try:
+            snapshot = read_trust_snapshot(reply["ping_trust"])
+            if reply.get("ping_trust_revision", snapshot["revision"]) != snapshot["revision"]:
+                raise ValueError
+        except ValueError:
+            LOG.warning("Ignoring an invalid ping trust snapshot from Victoria")
+            return False
+        if link.get("ping_trust") == snapshot:
+            return False
+        link["ping_trust"] = snapshot
+        return True
+
     def _enroll(self, link):
         self._verify_identity(link)
-        reply = self._request(link, "/enroll", {
+        payload = {
             "node_id": link["node_id"], "invite_token": link["invite_token"], "node_token": link["node_token"],
-        })
+        }
+        if self._ping_trust is not None:
+            payload["ping_trust_revision"] = None
+        reply = self._request(link, "/enroll", payload)
         if reply.get("center_id") != link["center_id"] or reply.get("node_id") != link["node_id"]:
             raise FederationError("Некорректное подтверждение регистрации.")
+        self._receive_ping_trust(link, reply)
         link["enrolled"] = True
         link.setdefault("invite_sha256", hashlib.sha256(link["invite_token"].encode("ascii")).hexdigest())
         del link["invite_token"]
@@ -344,7 +396,7 @@ class NodeSync:
         self._verify_identity(candidate)
         return self._request(candidate, "/sync", payload, authenticated=True), candidate
 
-    def _acknowledge(self, reply, history, results, candidate, update_request):
+    def _acknowledge(self, reply, history, results, link_update, update_request):
         history_ack, result_ack = reply.get("history_ack"), reply.get("result_ack")
         discarded = reply.get("result_discarded", [])
         if (not isinstance(history_ack, list) or not isinstance(result_ack, list) or not isinstance(discarded, list)
@@ -367,8 +419,8 @@ class NodeSync:
                            [(key,) for key in result_ack + discarded])
             db.execute("DELETE FROM federation_node_commands WHERE action = 'logs.read' AND acknowledged = 1")
             db.execute("INSERT OR REPLACE INTO federation_node_meta VALUES ('last_sync', ?)", (str(time.time()),))
-            if candidate is not None:
-                db.execute("UPDATE federation_node_meta SET value = ? WHERE key = 'link'", (json.dumps(candidate),))
+            if link_update is not None:
+                db.execute("UPDATE federation_node_meta SET value = ? WHERE key = 'link'", (json.dumps(link_update),))
             if "update_offer" in reply:
                 if offer is None:
                     db.execute("DELETE FROM federation_node_meta WHERE key = 'update_offer'")
@@ -430,9 +482,57 @@ class NodeSync:
                 WHERE id = ? AND (status != ? OR result != ?)
             """, (status, result, key, status, result))
 
+    def _availability_payload(self, link, db):
+        from availability_protocol import read_config
+
+        if self._availability_revision is None:
+            revision, targets = -1, {}
+            try:
+                revision, targets = read_config(self._meta(db, "availability_config"))
+                if targets is None:
+                    revision, targets = -1, {}
+            except ValueError:
+                pass
+            self._availability_probe.set_targets(targets, observer_id=link["node_id"])
+            self._availability_revision = revision
+        return {
+            "revision": self._availability_revision,
+            "results": [[key, *result] for key, result in self._availability_probe.results().items()],
+        }
+
+    def _apply_availability_config(self, link, revision, targets):
+        with closing(connect(self.db_file)) as db, db:
+            if revision == -1:
+                db.execute("DELETE FROM federation_node_meta WHERE key = 'availability_config'")
+            else:
+                config = {"revision": revision, "targets": list(targets.items())}
+                db.execute("INSERT OR REPLACE INTO federation_node_meta VALUES ('availability_config', ?)",
+                           (json.dumps(config),))
+        self._availability_probe.set_targets(targets, observer_id=link["node_id"])
+        self._availability_revision = revision
+
+    def _receive_availability(self, link, reply):
+        from availability_protocol import read_config
+
+        if "availability" not in reply:
+            if self._availability_revision != -1:
+                self._apply_availability_config(link, -1, {})
+            return
+        try:
+            revision, targets = read_config(reply["availability"])
+        except ValueError:
+            LOG.warning("Invalid availability configuration from Victoria")
+            return
+        if targets is not None:
+            self._apply_availability_config(link, revision, targets)
+        elif revision != self._availability_revision:
+            # Ask for the full target list on the next sync.
+            self._apply_availability_config(link, -1, {})
+
     def sync_once(self):
         with self._lock:
             link = self._load_link()
+            trust_revision = self._publish_ping_trust(link)
             if link is None:
                 return False
             if pending := link.get("pending_invitation"):
@@ -445,36 +545,63 @@ class NodeSync:
                     self._save_link(link)
                 else:
                     link = pending
+                    trust_revision = self._publish_ping_trust(link)
             if not link["enrolled"]:
                 self._enroll(link)
+                trust_revision = self._publish_ping_trust(link)
             history, results = self._outgoing()
             with closing(connect(self.db_file)) as db:
                 update_request = self._meta(db, "update_request")
+                availability = self._availability_payload(link, db) if self._availability_probe is not None else None
             system, arch = _local_target()
-            reply, candidate = self._exchange(link, {
+            payload = {
                 "node_id": link["node_id"], "version": self.version, "snapshot": self.snapshot(),
                 "history": history, "results": results,
                 "target": {"platform": system, "arch": arch}, "installed_package": self.installed_package,
                 "update_request": update_request,
-            })
+            }
+            if availability is not None:
+                payload["availability"] = availability
+            if self._ping_trust is not None:
+                payload["ping_trust_revision"] = trust_revision
+            try:
+                reply, candidate = self._exchange(link, payload)
+            except urllib.error.HTTPError as error:
+                if availability is not None and error.code == 401 and self._availability_revision != -1:
+                    self._apply_availability_config(link, -1, {})
+                if self._ping_trust is not None and error.code == 401 and "ping_trust" in link:
+                    del link["ping_trust"]
+                    self._save_link(link)
+                    self._publish_ping_trust(link)
+                raise
             commands = reply.get("commands")
             if (reply.get("center_id") != link["center_id"] or not isinstance(commands, list)
                     or len(commands) > 100 or any(not self._valid_command(command) for command in commands)):
                 raise FederationError("Некорректный ответ синхронизации.")
-            self._acknowledge(reply, history, results, candidate, update_request)
+            active_link = candidate or link
+            trust_changed = self._receive_ping_trust(active_link, reply)
+            self._acknowledge(reply, history, results, active_link if trust_changed else candidate, update_request)
+            if trust_changed or candidate is not None:
+                self._publish_ping_trust(active_link)
+            if availability is not None:
+                self._receive_availability(link, reply)
             for command in commands:
-                self._execute(candidate or link, command)
+                self._execute(active_link, command)
             self.last_error = None
             return True
 
     def start(self):
         if self._thread is None:
+            if self._availability_probe is not None:
+                self._availability_probe.start()
             self._thread = threading.Thread(target=self._loop, daemon=True, name="federation-sync")
             self._thread.start()
 
     def stop(self):
         self._stop.set()
         self._wake.set()
+        if self._availability_probe is not None:
+            self._availability_probe.stop()
 
     def _loop(self):
         delay = self.interval

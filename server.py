@@ -62,7 +62,7 @@ socketio = SocketIO(
 
 # Меняется с каждым выпуском: открытые панели сравнивают её с запомненной
 # при первом подключении и предлагают перезагрузить страницу
-VERSION = "Rel 1.3.2"
+VERSION = "Rel 1.4.1"
 
 PHONES_DIR = Path("users_data")
 AUTH_FILE = Path("auth.json")
@@ -2594,6 +2594,9 @@ def execute_federation_command(command, link):
 
 node_sync = None
 if ROLE == "node":
+    from availability_probe import AvailabilityProbe
+    from ping_trust import PingTrustFile
+
     poll_seconds = int(setting("FEDERATION_POLL_SECONDS", "5"))
     if not 1 <= poll_seconds <= 30:
         raise ValueError("FEDERATION_POLL_SECONDS должен быть от 1 до 30.")
@@ -2608,6 +2611,8 @@ if ROLE == "node":
         master_url = f"https://{host}:{port}" if port != 443 else f"https://{host}"
     node_sync = NodeSync(DB_FILE, VERSION, federation_snapshot, execute_federation_command,
                          interval=poll_seconds, master_url=master_url,
+                         availability_probe=AvailabilityProbe(ROLE),
+                         ping_trust=PingTrustFile(Path("ping-trust.json")),
                          on_connection=lambda outcome: journal_record("federation_status", outcome=outcome))
 
 
@@ -2688,15 +2693,19 @@ def main():
         node_sync.start()
     journal_record("service_started")
     alog("APP_READY", host=LISTEN_HOST, port=LISTEN_PORT, role=ROLE)
-    if os.environ.get("INEI_UPDATE_READY"):
-        from release_install import mark_ready
-        from werkzeug.serving import make_server
+    try:
+        if os.environ.get("INEI_UPDATE_READY"):
+            from release_install import mark_ready
+            from werkzeug.serving import make_server
 
-        listener = make_server(LISTEN_HOST, LISTEN_PORT, app, threaded=True)
-        mark_ready(VERSION, ROLE)
-        listener.serve_forever()
-        return
-    socketio.run(app, host=LISTEN_HOST, port=LISTEN_PORT, debug=False, allow_unsafe_werkzeug=True)
+            with make_server(LISTEN_HOST, LISTEN_PORT, app, threaded=True) as listener:
+                mark_ready(VERSION, ROLE)
+                listener.serve_forever()
+            return
+        socketio.run(app, host=LISTEN_HOST, port=LISTEN_PORT, debug=False, allow_unsafe_werkzeug=True)
+    finally:
+        if node_sync:
+            node_sync.stop()
 
 
 if __name__ == "__main__":

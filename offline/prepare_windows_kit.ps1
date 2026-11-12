@@ -3,8 +3,8 @@ $ErrorActionPreference = 'Stop'
 
 $source = [IO.Directory]::GetParent($PSScriptRoot).FullName
 $destination = Join-Path $source 'MonitoringSIP'
-$archive = Join-Path $PSScriptRoot 'MonitoringSIP_1.3.2_offline_windows_x64_fb3f7d2.zip'
-$expectedHash = 'E31C36D82497153E96AFB0D7308184E56549D63179DF48F18BEC2002557ACFC9'
+$archive = Join-Path $PSScriptRoot 'MonitoringSIP_1.4.1_offline_windows_x64_public-node.zip'
+$expectedHash = '5645F2FC18C5A42FF6D07F21713C3E155ABE4421EFC5EDA2A849456CBD59A397'
 
 function Test-OfflineKit([string]$Path) {
     foreach ($dir in '.', 'app', 'runtime', 'runtime\windows', 'vendor', 'vendor\flask') {
@@ -20,7 +20,7 @@ function Test-OfflineKit([string]$Path) {
     }
     $profile = [IO.File]::ReadAllText((Join-Path $Path 'PROFILE.txt')).Trim()
     $version = [IO.File]::ReadAllText((Join-Path $Path 'VERSION.txt'))
-    return $profile -ceq 'public_node' -and $version.Contains(' 1.3.2 (fb3f7d2),')
+    return $profile -ceq 'public_node' -and $version.Contains(' 1.4.1 (public-node),')
 }
 
 if (Test-Path -LiteralPath $destination) {

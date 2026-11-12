@@ -1074,6 +1074,9 @@ dialog::backdrop { background: #030810bf; }
       </div>
       <div class="section">
         <div class="section-head" style="cursor:default"><span class="section-title">Отправить тестовое событие</span></div>
+        <div style="padding:12px 16px 0;font-size:13px;color:var(--text-dim)">
+          Тест идёт из браузера. Доставку с телефона проверяйте в журнале после события на аппарате.
+        </div>
         <div class="test-fields">
           <div>
             <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Адрес сервера</div>
@@ -1105,7 +1108,7 @@ dialog::backdrop { background: #030810bf; }
           </div>
           <div class="aurl-controls">
             <div>
-              <label for="aurl-host">Адрес сервера (IP:порт или https://адрес)</label>
+              <label for="aurl-host">Адрес для телефона (IP:порт или полный HTTP/HTTPS-адрес)</label>
               <input id="aurl-host" class="modal-inp" oninput="renderActionUrls()" placeholder="192.168.1.10:8000" spellcheck="false">
             </div>
             <div>
@@ -2116,6 +2119,7 @@ let aurlCatalogUser = '';
 let aurlLoading = false;
 let aurlRequest = 0;
 let serverIp = '';
+let eventOrigin = '';
 let aurlInspectRequest = 0;
 let aurlInspectKey = '';
 let aurlInspectPending = false;
@@ -2124,8 +2128,12 @@ function defaultServerHost() {
   // Панель открыта на самом сервере — телефонам нужен его адрес в локалке
   if (serverIp && !serverIp.startsWith('127.')
       && ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname))
-    return `${serverIp}:${location.port || 80}`;
+    return location.port ? `${serverIp}:${location.port}` : serverIp;
   return location.host;
+}
+
+function defaultActionUrlOrigin() {
+  return eventOrigin || `${location.protocol}//${defaultServerHost()}`;
 }
 
 async function initActionUrlTab() {
@@ -2175,14 +2183,13 @@ async function loadActionUrlPhones() {
     if (!Array.isArray(d.events) || !Array.isArray(d.phones)
         || (d.username && d.username !== username))
       throw new Error('Сервер не вернул список карточек. Обновите страницу.');
+    const configuredOrigin = d.event_origin ? parseServerOrigin(d.event_origin).origin : '';
     actionUrlEvents = d.events;
     aurlPhones = d.phones;
     aurlCatalogUser = username;
     serverIp = d.server_ip || '';
-    if (!$('aurl-host').value) {
-      const scheme = location.protocol === 'https:' ? 'https:' : 'http:';
-      $('aurl-host').value = `${scheme}//${defaultServerHost()}`;
-    }
+    eventOrigin = configuredOrigin;
+    if (!$('aurl-host').value) $('aurl-host').value = defaultActionUrlOrigin();
     const previousTest = $('test-state').value;
     $('test-state').innerHTML = actionUrlEvents.map(e =>
       `<option value="${esc(e.key)}">${esc(e.ru)} — ${esc(e.en)}</option>`).join('');
@@ -2219,8 +2226,9 @@ function parseServerOrigin(raw, scheme = 'http:') {
 }
 
 function actionUrlOrigin() {
-  const url = parseServerOrigin($('aurl-host').value || defaultServerHost());
-  return url.origin;
+  const defaultOrigin = defaultActionUrlOrigin();
+  const input = $('aurl-host').value || defaultOrigin;
+  return parseServerOrigin(input, new URL(defaultOrigin).protocol).origin;
 }
 
 // Макросы остаются буквальными: их подставляет телефон при отправке события.
@@ -2589,8 +2597,7 @@ async function initUserInfo() {
     if (!res.ok) return;
     currentUserInfo = await res.json();
     $('nav-user').textContent = currentUserInfo.username;
-    if (currentUserInfo.is_admin) {
-      const federationLink = $('federation-link');
+    const federationLink = $('federation-link');
       federationLink.hidden = currentUserInfo.server_role !== 'node';
       $('tab-btn-accounts').style.display = '';
       $('tab-btn-tests').style.display = '';

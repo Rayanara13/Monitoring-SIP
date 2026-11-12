@@ -8,7 +8,7 @@
 #   bash offline/build_kit.sh --linux-arm64  общедоступный Linux ARM64
 set -euo pipefail
 
-RELEASE=1.3.2
+RELEASE=1.4.1
 PY_VER=3.13.15
 PBS_TAG=20260929   # релиз astral-sh/python-build-standalone с CPython $PY_VER
 
@@ -87,6 +87,7 @@ KIT="$STAGING/MonitoringSIP"
 APP_FILES=(
     server.py yealink_setup.py panel.html login.html node_link.html release_install.py
     federation_logs.py federation_node.py federation_updates.py
+    availability_probe.py availability_protocol.py ping_trust.py
     static/monitor.svg static/socket.io.min.js
     simulator/README.md simulator/__init__.py simulator/__main__.py
     simulator/app.py simulator/engine.py simulator/index.html
@@ -199,7 +200,7 @@ if $INCLUDE_LINUX; then
            "$LP"/lib/python3.13/config-3.13-*
     find "$LP/bin" -mindepth 1 ! -name python3.13 -delete
     find "$LP" -name __pycache__ -type d -prune -exec rm -rf {} +
-    cp "$HERE/start_linux.sh" "$HERE/install_service_linux.sh" "$KIT/"
+    cp "$HERE/start_linux.sh" "$HERE/install_service_linux.sh" "$HERE/configure_ping_linux.sh" "$HERE/ping_firewall_linux.py" "$KIT/"
     chmod +x "$KIT"/*.sh "$LP/bin/python3.13"
 fi
 if [ -n "$(find "$KIT" -type l)" ]; then echo "в комплекте остались симлинки" >&2; exit 1; fi
@@ -208,6 +209,7 @@ if [ -n "$(find "$KIT" -type l)" ]; then echo "в комплекте остал�
 cp "$HERE/run.py" "$KIT/"
 if $INCLUDE_WINDOWS; then
     for f in start_windows.bat open_port_windows.bat; do sed 's/\r*$/\r/' "$HERE/$f" > "$KIT/$f"; done
+    cp "$HERE/configure_ping_windows.ps1" "$KIT/"
 fi
 # инструкция: CRLF + BOM, чтобы старый Блокнот не показал кракозябры
 { printf '\xef\xbb\xbf'; sed 's/\r*$/\r/' "$HERE/ИНСТРУКЦИЯ.txt"; } > "$KIT/ИНСТРУКЦИЯ.txt"

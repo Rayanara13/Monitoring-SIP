@@ -33,12 +33,13 @@ _ENUM_FIELDS = {
     "phone_reachability": {"status": {"online", "offline"}},
     "auth_result": {"outcome": {"success", "failed", "blocked"}},
     "federation_status": {"outcome": {"connected", "disconnected"}},
-    "admin_action": {"action": {"node.create", "node.invite", "node.revoke", "command.queue", "package.upload"}},
+    "admin_action": {"action": {"node.create", "node.invite", "node.revoke", "command.queue", "package.upload",
+                                "availability.add", "availability.edit", "availability.delete"}},
 }
 
 
 class JournalError(ValueError):
-    """Ошибка журнала, безопасная для передачи серверу."""
+    """Ошибка журнала, безопасная для передачи в Викторию."""
 
 
 def _integer_in_range(value, maximum, minimum=1):
@@ -64,7 +65,7 @@ def _safe_fields(kind, fields):
 
 
 def validate_journal_result(result):
-    """Проверить схему ответа перед сохранением на сервере."""
+    """Проверить схему ответа перед сохранением в базе Виктории."""
     if not isinstance(result, dict) or set(result) != {"entries", "next_before"}:
         raise JournalError("Некорректный ответ журнала.")
     entries, cursor = result["entries"], result["next_before"]

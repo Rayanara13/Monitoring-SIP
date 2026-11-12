@@ -1,4 +1,4 @@
-ИНЕЙ 1.3.2 — установка без интернета (Windows и Linux)
+ИНЕЙ 1.4.1 — установка без интернета (Windows и Linux)
 ======================================================
 
 Панель мониторинга трубок Yealink: кто в разговоре, кто звонит, кто офлайн,
@@ -7,9 +7,9 @@
 Интернет НЕ нужен. Python и все библиотеки уже лежат в архиве, ставить
 ничего не надо: распаковал -> запустил.
 
-MonitoringSIP_1.3.2_offline_windows_x64_<hash>.zip — Windows x64.
-MonitoringSIP_1.3.2_offline_linux_x64_<hash>.zip — Linux x86_64.
-MonitoringSIP_1.3.2_offline_linux_arm64_<hash>.zip — Linux ARM64 (aarch64).
+MonitoringSIP_1.4.1_offline_windows_x64_<сборка>.zip — Windows x64.
+MonitoringSIP_1.4.1_offline_linux_x64_<сборка>.zip — Linux x86_64.
+MonitoringSIP_1.4.1_offline_linux_arm64_<сборка>.zip — Linux ARM64 (aarch64).
 
 WINDOWS X64 ЧЕРЕЗ CODE → DOWNLOAD ZIP
 ------------------------------------
@@ -149,6 +149,9 @@ WINDOWS X64 ЧЕРЕЗ CODE → DOWNLOAD ZIP
 
   5) Если администратор выдал файл подключения, открой страницу подключения
      в панели и загрузи выданный JSON.
+     Узел получает список целей проверки доступности при синхронизации и
+     передаёт результаты пинга на сервер мониторинга. На Linux для этого
+     нужна команда ping из iputils.
 
 
 5. НАСТРОЙКА ТЕЛЕФОНОВ YEALINK (Action URL)
